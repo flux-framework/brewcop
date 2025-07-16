@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 
-##############################################################
-#  Copyright 2019 Jim Garlick <garlick.jim@gmail.com>
-#  (c.f. COPYING)
+#############################################################
+# Copyright 2018 Lawrence Livermore National Security, LLC
+# (c.f. AUTHORS, NOTICE.LLNS, COPYING)
 #
-#  This file is part of BREWCOP, a coffee pot monitor.
-#  For details, see https://github.com/garlick/brewcop.
+# This file is part of the Flux resource manager framework.
+# For details, see https://github.com/flux-framework.
 #
-#  SPDX-License-Identifier: BSD-3-Clause
-##############################################################
+# SPDX-License-Identifier: LGPL-3.0
+#############################################################
 
 import urwid
 import serial

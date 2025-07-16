@@ -2,10 +2,11 @@
 
 **B**REWCOP is a **R**aspberry pi that **E**lectronically **W**eighs **CO**ffee **P**ots
 
-A 2018 Hackathon project produced this python script, which talks to a
-point-of-sale scale sitting under the Technivorm Moccamaster at work.
-Slack notifications are issued when the pot transitions to *brewing*, *ready*,
-or *empty*.  The scale is also functional for weighing beans.
+A 2018 Hackathon project produced an early version of this python script,
+which talks to a point-of-sale scale sitting under the Technivorm Moccamaster
+at work.  Slack notifications are issued when the pot transitions to
+*brewing*, *ready*, or *empty*.  The scale is also functional for weighing
+beans.
 
 ### Touchscreen
 
@@ -17,16 +18,6 @@ for power:
 
 * Pin 4 (5V) to red wire
 * Pin 6 (GND) to black wire
-
-The display is inverted by default on our brewcop for some reason.
-This must be added to `/boot/firmware/config.txt`
-```
-lcd_rotate=2
-```
-and this to `/boot/firmware/config.txt`
-```
-video=DSI-1:800x480M@60,rotate=180
-```
 
 The pi is configured to login as `brewcop` automatically and start
 `brewcop.py` which takes over the display using [urwid](https://urwid.org/).
@@ -77,4 +68,6 @@ environment of `brewcop.py`.
 
 #### Release
 
-SPDX-License-Identifier: BSD-3-Clause
+SPDX-License-Identifier: LGPL-3.0
+
+LLNL-CODE-764420
