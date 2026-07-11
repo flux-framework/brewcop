@@ -1,0 +1,17 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+
+# C build artifacts (test/Makefile)
+*.o
+/test/query
+
+# Secrets / local machine config (ship etc/config.toml.example instead)
+config.toml
+brewcop-trace-*.csv
+
+# Editor / OS
+*.swp
+.DS_Store
