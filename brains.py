@@ -83,6 +83,7 @@ class Brains:
         self._samples = deque()  # (t, net) within RATE_WINDOW_S
         self.state = "unknown"
         self.ready_time = None  # wall-clock when current coffee became ready
+        self.clean_time = None  # wall-clock when the pot was last cleaned
         self.timestamp = 0  # when the current state was entered
 
     def store(self, net):
@@ -127,20 +128,22 @@ class Brains:
         # (placement / return / pour-back).  None of these is brewing.
         event = None
         if prev == "brewing":
-            # A brew just finished on the scale: fresh coffee, known age.
-            # Reset the age clock and notify.
-            self.ready_time = t
-            event = "ready"
+            # A brew just finished on the scale.  Accept it as fresh only if
+            # the pot was cleaned since the last batch; otherwise this is a
+            # brew into a still-dirty pot -- refuse to reset the age clock, so
+            # the pot stays flagged dirty (you must clean it, which means
+            # dumping and rebrewing).
+            if self._cleaned_since_last_brew():
+                self.ready_time = t
+                event = "ready"
             self._set_state(t, "ready")
         elif self.ready_time is not None:
-            # Coffee present and we already have an age from an earlier brew
-            # (e.g. the pot returning after being carried around) -> keep it.
+            # Coffee present with an age from an earlier brew (e.g. the pot
+            # returning after being carried around) -> keep it.
             self._set_state(t, "ready")
         else:
-            # Coffee present but we never observed it brew (cold start, or
-            # non-coffee weight placed on the scale).  We cannot vouch for
-            # its freshness, so do NOT claim "ready"/fresh and do NOT notify;
-            # "ready" is only reachable by actually watching a brew.
+            # Coffee present but never observed brewing (cold start, or
+            # non-coffee weight).  Age unknown -- do NOT claim ready/notify.
             self._set_state(t, "present")
         return event
 
@@ -148,6 +151,36 @@ class Brains:
         if self.state != s:
             self.state = s
             self.timestamp = t
+
+    def _cleaned_since_last_brew(self):
+        # True if there's no batch yet, or the pot was cleaned after the last
+        # accepted brew.  Gates whether a new brew is accepted as fresh.
+        if self.ready_time is None:
+            return True
+        return self.clean_time is not None and self.clean_time > self.ready_time
+
+    def is_stale(self, stale_s, now=None):
+        """True if the current batch has aged past the stale threshold."""
+        if self.ready_time is None:
+            return False
+        if now is None:
+            now = self._now()
+        return (now - self.ready_time) >= stale_s
+
+    def is_dirty(self, stale_s, now=None):
+        """
+        True if the pot needs cleaning: a batch has gone stale and the pot
+        has not been cleaned since that batch brewed.  This is what drives the
+        biohazard, and it survives a rebrew (a dirty rebrew is rejected, so
+        ready_time still points at the stale batch).
+        """
+        return self.is_stale(stale_s, now) and not self._cleaned_since_last_brew()
+
+    def clean(self, now=None):
+        """Record that the pot was cleaned (clears the dirty flag)."""
+        if now is None:
+            now = self._now()
+        self.clean_time = now
 
     def elapsed(self, now=None):
         """
@@ -173,6 +206,7 @@ class Brains:
         return {
             "state": self.state,
             "ready_time": self.ready_time,
+            "clean_time": self.clean_time,
             "timestamp": self.timestamp,
         }
 
@@ -182,6 +216,7 @@ class Brains:
             return
         self.state = snap.get("state", self.state)
         self.ready_time = snap.get("ready_time", self.ready_time)
+        self.clean_time = snap.get("clean_time", self.clean_time)
         self.timestamp = snap.get("timestamp", self.timestamp)
 
 

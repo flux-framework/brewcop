@@ -77,6 +77,14 @@ class TestBrains(unittest.TestCase):
             feed(b, clk, net)
         return net
 
+    def _brew_and_settle(self, b, clk, target=900):
+        # Brew, then hold steady long enough for the rate window to drain so
+        # the state settles out of "brewing" (accept/reject fires here).
+        net = self._brew_to_full(b, clk, target=target)
+        for _ in range(int(brains.Brains.RATE_WINDOW_S / 0.5) + 3):
+            feed(b, clk, net)
+        return net
+
     def test_gradual_fill_is_brewing(self):
         b, clk = make()
         self._brew_to_full(b, clk)
@@ -163,6 +171,65 @@ class TestBrains(unittest.TestCase):
             feed(b, clk, -800, dt=120)  # pot away
         feed(b, clk, 700)  # step return
         self.assertEqual(b.state, "ready")
+
+    # --- dirty-pot / clean-button behavior --------------------------------
+    STALE = 4 * 3600
+
+    def test_fresh_brew_becomes_dirty_when_stale(self):
+        b, clk = make()
+        net = self._brew_to_full(b, clk)
+        for _ in range(12):
+            feed(b, clk, net)
+        self.assertFalse(b.is_dirty(self.STALE))
+        clk.advance(self.STALE + 10)
+        b.store(net)
+        self.assertTrue(b.is_dirty(self.STALE))
+
+    def test_rebrew_into_dirty_pot_rejected_stays_dirty(self):
+        b, clk = make()
+        net = self._brew_to_full(b, clk)
+        for _ in range(12):
+            feed(b, clk, net)
+        rt1 = b.ready_time
+        clk.advance(self.STALE + 10)
+        b.store(net)  # now dirty
+        # dump, then rebrew without cleaning
+        feed(b, clk, -800)
+        self._brew_and_settle(b, clk)
+        self.assertEqual(b.ready_time, rt1)  # NOT reset -> stays dirty
+        self.assertTrue(b.is_dirty(self.STALE))
+
+    def test_clean_clears_dirty(self):
+        b, clk = make()
+        net = self._brew_to_full(b, clk)
+        for _ in range(12):
+            feed(b, clk, net)
+        clk.advance(self.STALE + 10)
+        b.store(net)
+        self.assertTrue(b.is_dirty(self.STALE))
+        b.clean()
+        self.assertFalse(b.is_dirty(self.STALE))
+
+    def test_proactive_clean_before_stale_never_dirty(self):
+        b, clk = make()
+        net = self._brew_to_full(b, clk)
+        for _ in range(12):
+            feed(b, clk, net)
+        feed(b, clk, -800, dt=600)  # dump while fresh
+        b.clean()  # wash
+        self.assertFalse(b.is_dirty(self.STALE))
+
+    def test_dirty_survives_dump_until_clean(self):
+        b, clk = make()
+        net = self._brew_to_full(b, clk)
+        for _ in range(12):
+            feed(b, clk, net)
+        clk.advance(self.STALE + 10)
+        b.store(net)
+        feed(b, clk, -800)  # dump the stale coffee (no clean)
+        self.assertTrue(b.is_dirty(self.STALE))  # still dirty
+        b.clean()
+        self.assertFalse(b.is_dirty(self.STALE))
 
     def test_snapshot_restore_preserves_age(self):
         # brew -> ready, snapshot; a fresh Brains that restores it reports the
