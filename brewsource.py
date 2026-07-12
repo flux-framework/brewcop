@@ -73,7 +73,10 @@ class ScaleBrewSource:
         # in motion (a bump, a pour).
         self._last_pot = potstate.PotState("no_pot", "No pot on scale", 0.0, False)
 
-    def poll(self):
+    def poll(self, target_g=None):
+        # target_g: expected finished-brew level (full/half pot, grams) so an
+        # under-target settle isn't declared a completed brew.  None = accept
+        # any settled brew.
         # Read the scale (never let a serial hiccup crash the caller).
         try:
             self._scale.poll()
@@ -95,7 +98,7 @@ class ScaleBrewSource:
         # matching how the original code stored w = weight - tare.  Brains
         # only cares about relative change + empty thresh.
         net = potstate.net_contents_g(raw, self._settings["pot_tare_g"])
-        event = self._brains.store(net)
+        event = self._brains.store(net, target_g=target_g)
         self._maybe_persist()
 
         stale_s = float(self._settings["stale_hours"]) * 3600.0
@@ -138,7 +141,8 @@ class MockBrewSource:
         self._states = list(states)
         self._i = 0
 
-    def poll(self):
+    def poll(self, target_g=None):
+        # target_g ignored: mock states are canned, not weight-derived.
         st = self._states[self._i]
         return PollResult(st, event=None, raw_grams=None, valid=True)
 
