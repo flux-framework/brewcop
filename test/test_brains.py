@@ -97,14 +97,16 @@ class TestBrains(unittest.TestCase):
         # age starts near zero right after ready
         self.assertLess(b.elapsed(), 5)
 
-    def test_step_placement_is_not_brewing(self):
-        # a full pot set down in one step (hundreds of g in 0.5 s) -> ready,
-        # never brewing, no "ready" event (it wasn't brewed here)
+    def test_step_placement_is_present_not_ready(self):
+        # a full pot set down in one step (hundreds of g in 0.5 s), with no
+        # prior brew observed -> "present" (age unknown), NEVER brewing, and
+        # NO "ready" event -- "ready"/fresh is only reachable via a brew.
         b, clk = make()
         feed(b, clk, 0)
         event = feed(b, clk, 900)  # +900 g in one tick = 1800 g/s
-        self.assertEqual(b.state, "ready")
+        self.assertEqual(b.state, "present")
         self.assertIsNone(event)
+        self.assertIsNone(b.ready_time)
 
     def test_age_ticks_while_pot_absent(self):
         # brew -> ready, then remove the pot; age must keep advancing so the
@@ -139,15 +141,28 @@ class TestBrains(unittest.TestCase):
         event = feed(b, clk, 700)  # step return
         self.assertIsNone(event)
 
-    def test_startup_with_coffee_assumes_fresh(self):
-        # a pot with coffee already present at first sight -> ready, age ~0,
-        # no event
+    def test_startup_with_coffee_is_present_age_unknown(self):
+        # a pot with coffee already present at first sight (cold start): we
+        # never watched it brew, so age is unknown -> "present", no event,
+        # no ready_time (do NOT claim it's fresh)
         b, clk = make()
         event = feed(b, clk, 800)
-        self.assertEqual(b.state, "ready")
+        self.assertEqual(b.state, "present")
         self.assertIsNone(event)
-        self.assertIsNotNone(b.ready_time)
-        self.assertLess(b.elapsed(), 5)
+        self.assertIsNone(b.ready_time)
+
+    def test_return_after_brew_shows_ready_not_present(self):
+        # once a brew has been observed, a step return keeps "ready" (with the
+        # preserved age), NOT "present" -- we know this coffee's age
+        b, clk = make()
+        net = self._brew_to_full(b, clk)
+        for _ in range(12):
+            feed(b, clk, net)  # settle -> ready
+        self.assertEqual(b.state, "ready")
+        for _ in range(3):
+            feed(b, clk, -800, dt=120)  # pot away
+        feed(b, clk, 700)  # step return
+        self.assertEqual(b.state, "ready")
 
 
 if __name__ == "__main__":

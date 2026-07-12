@@ -62,7 +62,10 @@ class Brains:
     against real weight traces captured with test/scale_probe.py.
 
     store() returns "ready" on the brewing->settled transition (the point to
-    notify); state is empty|brewing|ready|unknown; elapsed() gives the value
+    notify); state is empty|brewing|ready|present|unknown, where "present"
+    means coffee is on the scale but we never observed it brew (cold start,
+    or non-coffee weight) so its age is unknown -- distinct from "ready",
+    which is only reachable by watching a brew.  elapsed() gives the value
     the UI wants per state (brew duration while brewing, coffee age while
     ready).
     """
@@ -121,17 +124,24 @@ class Brains:
             return None
 
         # Otherwise settled: stable, declining (pouring), or a step jump
-        # (placement / return / pour-back) -- all mean "ready", not brewing.
+        # (placement / return / pour-back).  None of these is brewing.
         event = None
         if prev == "brewing":
-            # A brew just finished: fresh coffee, reset the age clock, notify.
+            # A brew just finished on the scale: fresh coffee, known age.
+            # Reset the age clock and notify.
             self.ready_time = t
             event = "ready"
-        elif self.ready_time is None:
-            # First sight of coffee with no prior brew (startup, or a pot
-            # placed with coffee already in it): assume fresh as of now.
-            self.ready_time = t
-        self._set_state(t, "ready")
+            self._set_state(t, "ready")
+        elif self.ready_time is not None:
+            # Coffee present and we already have an age from an earlier brew
+            # (e.g. the pot returning after being carried around) -> keep it.
+            self._set_state(t, "ready")
+        else:
+            # Coffee present but we never observed it brew (cold start, or
+            # non-coffee weight placed on the scale).  We cannot vouch for
+            # its freshness, so do NOT claim "ready"/fresh and do NOT notify;
+            # "ready" is only reachable by actually watching a brew.
+            self._set_state(t, "present")
         return event
 
     def _set_state(self, t, s):
