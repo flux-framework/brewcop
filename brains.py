@@ -161,5 +161,28 @@ class Brains:
             return now - self.ready_time
         return now - self.timestamp
 
+    # --- persistence --------------------------------------------------
+    # ready_time is absolute wall-clock, so persisting it across a reboot
+    # restores the *true* coffee age (now - ready_time) even if the pot aged
+    # while brewcop was powered off.  The transient weight window is not
+    # persisted (it rebuilds within RATE_WINDOW_S); only the durable brew
+    # facts are.  IO lives in the caller (brewsource), not here.
+
+    def snapshot(self):
+        """Return the durable brew state as a plain dict (JSON-friendly)."""
+        return {
+            "state": self.state,
+            "ready_time": self.ready_time,
+            "timestamp": self.timestamp,
+        }
+
+    def restore(self, snap):
+        """Restore durable brew state from a snapshot() dict (best effort)."""
+        if not snap:
+            return
+        self.state = snap.get("state", self.state)
+        self.ready_time = snap.get("ready_time", self.ready_time)
+        self.timestamp = snap.get("timestamp", self.timestamp)
+
 
 # vim: tabstop=4 shiftwidth=4 expandtab

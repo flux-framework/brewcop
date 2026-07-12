@@ -164,6 +164,28 @@ class TestBrains(unittest.TestCase):
         feed(b, clk, 700)  # step return
         self.assertEqual(b.state, "ready")
 
+    def test_snapshot_restore_preserves_age(self):
+        # brew -> ready, snapshot; a fresh Brains that restores it reports the
+        # same coffee age (ready_time is absolute, so it survives a "reboot")
+        b, clk = make()
+        net = self._brew_to_full(b, clk)
+        for _ in range(12):
+            feed(b, clk, net)
+        self.assertEqual(b.state, "ready")
+        snap = b.snapshot()
+
+        clk.advance(3600)  # an hour passes (incl. any downtime)
+        b2 = brains.Brains(empty_thresh=50, now=clk)
+        b2.restore(snap)
+        self.assertEqual(b2.state, "ready")
+        # age reflects the original ready_time -> ~1 h, not zero
+        self.assertGreater(b2.elapsed(), 3600 - 5)
+
+    def test_restore_none_is_noop(self):
+        b, _ = make()
+        b.restore(None)  # must not raise
+        self.assertEqual(b.state, "unknown")
+
 
 if __name__ == "__main__":
     unittest.main()
