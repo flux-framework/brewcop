@@ -51,13 +51,23 @@ class ScaleBrewSource:
     stale_hours (the user settings; config is the single source of truth).
     """
 
-    def __init__(self, scale, settings, tick_period=0.5):
+    def __init__(self, scale, settings, tick_period=0.5, persist=None):
         self._scale = scale
         self._settings = settings
         self._brains = Brains(
             tick_period=tick_period,
             empty_thresh=settings["empty_thresh_g"],
         )
+        # Optional persistence module (brewstate) so the brew age survives
+        # reboots.  Restore any saved snapshot, and remember it so we only
+        # write back when the durable state actually changes.
+        self._persist = persist
+        self._saved_snap = None
+        if persist is not None:
+            snap = persist.load()
+            if snap:
+                self._brains.restore(snap)
+                self._saved_snap = self._brains.snapshot()
         # Last valid PotState, held through brief invalid/moving readings so
         # the display doesn't flap to "unavailable" every time the scale is
         # in motion (a bump, a pour).
@@ -86,6 +96,7 @@ class ScaleBrewSource:
         # only cares about relative change + empty thresh.
         net = potstate.net_contents_g(raw, self._settings["pot_tare_g"])
         event = self._brains.store(net)
+        self._maybe_persist()
 
         pot = potstate.derive(
             raw_weight_g=raw,
@@ -96,6 +107,16 @@ class ScaleBrewSource:
         )
         self._last_pot = pot
         return PollResult(pot, event=event, raw_grams=raw, valid=True, moving=False)
+
+    def _maybe_persist(self):
+        # Save only when the durable brew state actually changed, so writes
+        # are rare (kind to the writable partition).
+        if self._persist is None:
+            return
+        snap = self._brains.snapshot()
+        if snap != self._saved_snap:
+            self._persist.save(snap)
+            self._saved_snap = snap
 
 
 class MockBrewSource:

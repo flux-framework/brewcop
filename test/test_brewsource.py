@@ -58,6 +58,22 @@ class FailingScale:
     weight = 0.0
 
 
+class FakePersist:
+    """In-memory stand-in for the brewstate module."""
+
+    def __init__(self, snap=None):
+        self.snap = snap
+        self.saves = 0
+
+    def load(self):
+        return self.snap
+
+    def save(self, snap):
+        self.snap = dict(snap)
+        self.saves += 1
+        return True
+
+
 class TestScaleBrewSource(unittest.TestCase):
     def test_no_pot_below_tare(self):
         sc = ScriptedScale([(0.0, True)])
@@ -120,6 +136,29 @@ class TestScaleBrewSource(unittest.TestCase):
         # ...and it settles to "present" (coffee, but age unknown -- we never
         # watched it brew), NOT "fresh" and NOT "brewing"
         self.assertEqual(src.poll().pot_state.key, "present")
+
+    def test_restores_persisted_ready_state(self):
+        # A saved "ready" snapshot from a prior run is restored on init, so a
+        # pot present at startup reads as ready (known age), not "present".
+        snap = {"state": "ready", "ready_time": 100.0, "timestamp": 100.0}
+        persist = FakePersist(snap)
+        sc = ScriptedScale([(795 + 900, True)] * 3)
+        src = brewsource.ScaleBrewSource(sc, SETTINGS, persist=persist)
+        r = None
+        for _ in range(3):
+            r = src.poll()
+        # restored ready_time -> a real coffee state, not "present"
+        self.assertIn(r.pot_state.key, ("fresh", "aging", "stale"))
+
+    def test_persists_only_on_change(self):
+        # Steady readings after the first shouldn't keep rewriting the file.
+        persist = FakePersist()
+        sc = ScriptedScale([(795 + 900, True)] * 5)
+        src = brewsource.ScaleBrewSource(sc, SETTINGS, persist=persist)
+        for _ in range(5):
+            src.poll()
+        # state settles once (unknown->present) then holds -> very few saves
+        self.assertLessEqual(persist.saves, 2)
 
 
 class TestMockBrewSource(unittest.TestCase):
