@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 
 #############################################################
-# Copyright 2018 Lawrence Livermore National Security, LLC
+# Copyright 2026 Lawrence Livermore National Security, LLC
 # (c.f. AUTHORS, NOTICE.LLNS, COPYING)
 #
 # This file is part of the Flux resource manager framework.
@@ -10,509 +10,1077 @@
 # SPDX-License-Identifier: LGPL-3.0
 #############################################################
 
-import urwid
-import serial
-from collections import deque
-import time
+"""
+brewcop touchscreen app.
+
+A Kivy touchscreen coffee monitor for the Technivorm at B451.  Reads the
+Avery Berkel scale, interprets weight as brew activity, and shows a live
+carafe (level + freshness, with a blinking biohazard for a stale pot).
+
+Screens (three total):
+  Home     -- Flux mark + wordmark, the live carafe, a pot-status line, and
+              a Weigh / (Mark cleaned) action button.  Monitoring is always
+              on; Home is the brew view.
+  Weigh    -- live scale weight, g/oz units toggle, tare, dosing hint.
+  Settings -- Slack on/off + steppers for tunable parameters (usersettings).
+
+Data comes from a brewsource: the real ScaleBrewSource (scale -> Brains ->
+potstate) in normal operation, or a MockBrewSource cycling canned states
+under --mock (for developing the UI without hardware; tap the carafe to
+advance).
+
+Notifications: on a brewing->ready event we notify Slack ONLY IF the user
+setting slack_enabled is on -- which defaults OFF, because the brew detector
+is still over-eager (historically it stormed the channel on every pour) and
+must be retuned against real weight traces first.
+
+Config: machine facts (serial port, webhook URL, location) come from
+machineconfig (read-only /etc/brewcop/config.toml); tweakable preferences
+from usersettings (writable JSON, saved on the Settings screen).
+
+Usage:
+    python3 brewcop.py [--mock] [--windowed]
+
+Press 'q' or Escape to quit.  Targets the Kivy 2.1.0 API (Bookworm).
+"""
+
+import argparse
 import os
-import requests
-import random
+import sys
+
+import kivy
+
+from kivy.app import App
+from kivy.clock import Clock
+from kivy.core.image import Image as CoreImage
+from kivy.core.window import Window
+from kivy.graphics import Color, RoundedRectangle, Rectangle, Line, Mesh
+from kivy.metrics import dp, sp
+from kivy.uix.boxlayout import BoxLayout
+from kivy.uix.button import Button
+from kivy.uix.floatlayout import FloatLayout
+from kivy.uix.image import Image as ImageWidget
+from kivy.uix.label import Label
+from kivy.uix.scrollview import ScrollView
+from kivy.uix.screenmanager import ScreenManager, Screen, SlideTransition
+from kivy.uix.widget import Widget
+
+import machineconfig
+import usersettings
+import potstate
+import brewsource
+from scale import open_scale, NoScale, POT_TOLERANCE_G
+from backlight import Backlight
+
+kivy.require("2.1.0")
+
+# Image assets live in ./images relative to this script (repo root).
+IMAGES_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "images")
+BIOHAZARD_PNG = os.path.join(IMAGES_DIR, "biohazard.png")
+FLUX_MARK_PNG = os.path.join(IMAGES_DIR, "flux-mark.png")
+
+# --- palette -------------------------------------------------------------
+# "Serious" dark theme: charcoal ground, restrained ink, one blue accent
+# (roughly Flux blue) plus semantic green/amber/red for coffee state.
+BG = (0.09, 0.10, 0.12, 1)  # near-black charcoal
+PANEL = (0.14, 0.16, 0.19, 1)  # slightly raised card
+INK = (0.90, 0.92, 0.94, 1)  # primary text
+MUTED = (0.55, 0.60, 0.66, 1)  # secondary text
+ACCENT = (0.29, 0.62, 1.00, 1)  # flux-ish blue
+GREEN = (0.36, 0.78, 0.45, 1)  # fresh / ready
+AMBER = (0.95, 0.72, 0.25, 1)  # aging / stale nag
+RED = (0.92, 0.35, 0.35, 1)  # empty / kaput
+HAZARD = (0.95, 0.85, 0.10, 1)  # biohazard yellow (stale warning)
+GRAPHITE = (0.16, 0.17, 0.20, 1)  # carafe lid/handle/base (dark plastic;
+# dark, but not pure black so it still
+# reads against the charcoal background)
+STEEL = (0.62, 0.66, 0.70, 1)  # brushed-steel carafe body
 
 
-class Scale:
+# Settings/config live in dedicated modules now: user-tweakable preferences
+# in usersettings.UserSettings (writable JSON), machine facts in
+# machineconfig (read-only TOML).  POT_TOLERANCE_G comes from scale.
+
+
+# --- graphics helpers ----------------------------------------------------
+def _fill(widget, rgba, radius=0):
+    """Paint a solid (optionally rounded) background behind a widget.
+
+    Stashes both the Color instruction (widget._bg_color) and the shape
+    (widget._bg) so callers can recolor or reposition later.  Graphics
+    instructions are Cython objects with no __dict__, so rgba lives on the
+    Color, not the shape.
     """
-    Manage the Avery-Berkel 6702-16658 bench scale in ECR mode.
-    """
-
-    path_serial = "/dev/ttyAMA0"
-
-    def __init__(self):
-        self._weight = 0.0
-        self._weight_is_valid = False
-        self.ecr_status = None
-        self.tare_offset = 0.0
-
-        self.ser = serial.Serial()
-        self.ser.port = self.path_serial
-        self.ser.baudrate = 9600
-        self.ser.timeout = 0.25
-        self.ser.parity = serial.PARITY_EVEN
-        self.ser.bytesize = serial.SEVENBITS
-        self.ser.stopbits = serial.STOPBITS_ONE
-        self.ser.xonxoff = False
-        self.ser.rtscts = False
-        self.ser.dsrdtr = False
-        self.ser.open()
-
-    def ecr_set_status(self, response):
-        """Parse response and set internal ECR status"""
-        assert len(response) == 6
-        assert response[0:2] == b"\nS"
-        assert response[4:5] == b"\r"
-        self.ecr_status = response[2:4]
-
-    def ecr_read(self):
-        """Read to ECR EOT (3)"""
-        message = bytearray()
-        while len(message) == 0 or message[-1] != 3:
-            ch = self.ser.read(size=1)
-            assert len(ch) == 1  # fail on timeout
-            message.append(ch[0])
-        return message
-
-    def zero(self):
-        """Send ECR Zero command to the scale and read back status"""
-        self.ser.reset_input_buffer()
-        self.ser.write(b"Z\r")
-        response = self.ecr_read()
-        self.ecr_set_status(response)
-
-    def poll(self):
-        """
-        Send ECR Weigh command to the scale and read back either
-        weight + status, or just status.  If a valid weight is returned,
-        set _weight_is_valid True and convert pounds to grams.
-        """
-        self.ser.reset_input_buffer()
-        self.ser.write(b"W\r")
-        response = self.ecr_read()
-        if len(response) == 16:
-            assert response[0:1] == b"\n"
-            assert response[7:10] == b"LB\r"
-            self._weight = float(response[1:7]) * 453.592
-            self.ecr_set_status(response[10:16])
-            self._weight_is_valid = True
+    with widget.canvas.before:
+        widget._bg_color = Color(*rgba)
+        if radius:
+            widget._bg = RoundedRectangle(
+                radius=[radius], pos=widget.pos, size=widget.size
+            )
         else:
-            self.ecr_set_status(response)
-            self._weight_is_valid = False
+            widget._bg = Rectangle(pos=widget.pos, size=widget.size)
 
-    def tare(self):
-        """Incorporate weight of container on scale into future measurements"""
-        self.tare_offset = self._weight
+    def _sync(*_a):
+        widget._bg.pos = widget.pos
+        widget._bg.size = widget.size
 
-    @property
-    def at_zero(self):
-        """
-        Test if scale status indicates scale is at zero.  The zero LED
-        on the scale will be lit in this case.
-        """
-        if self.ecr_status == b"20":
+    widget.bind(pos=_sync, size=_sync)
+
+
+class FlatButton(Button):
+    """A borderless, flat-styled button with our theme colors."""
+
+    def __init__(self, bg=PANEL, fg=INK, **kwargs):
+        super().__init__(**kwargs)
+        self.background_normal = ""
+        self.background_down = ""
+        self.background_color = (0, 0, 0, 0)  # draw our own
+        self.color = fg
+        self._bg_rgba = bg
+        _fill(self, bg, radius=dp(10))
+        self.bind(state=self._on_state)
+
+    def _on_state(self, _w, state):
+        # brighten the panel slightly while pressed, for touch feedback.
+        r, g, b, a = self._bg_rgba
+        if state == "down":
+            self._bg_color.rgba = (
+                min(r + 0.10, 1),
+                min(g + 0.10, 1),
+                min(b + 0.10, 1),
+                a,
+            )
+        else:
+            self._bg_color.rgba = self._bg_rgba
+
+
+class CarafeWidget(Widget):
+    """A stylized Technivorm thermal carafe that fills with coffee.
+
+    `fill` is 0..1 (fraction full).  `coffee_rgba` colors the liquid (we
+    tint it by freshness elsewhere: green fresh -> amber aging).  When
+    `expired` is True and there is still coffee, a blinking biohazard symbol
+    is overlaid as a "someone left the old pot" nag.
+
+    The carafe is (necessarily) a stylized infographic: the real Moccamaster
+    thermal carafe is opaque brushed steel, so the coffee level is shown as
+    a fill inside the silhouette rather than a literal view.
+
+    Everything is redrawn from scratch in _redraw() on any pos/size/state
+    change.  Coordinates are computed relative to the widget box so it
+    scales with the layout.
+    """
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self._fill = 0.0
+        self._coffee = GREEN
+        self._expired = False
+        self._blink_on = True
+        self._blink_ev = None
+        # Load the biohazard PNG once; tolerate it being absent (fall back to
+        # no image -- the caption still conveys the warning).
+        try:
+            self._hazard_tex = CoreImage(BIOHAZARD_PNG).texture
+        except Exception:
+            self._hazard_tex = None
+        self.bind(pos=self._redraw, size=self._redraw)
+
+    # --- public state --------------------------------------------------
+    def set_state(self, fill, coffee_rgba, expired):
+        self._fill = max(0.0, min(1.0, fill))
+        self._coffee = coffee_rgba
+        self._expired = expired
+        show_hazard = expired and self._fill > 0.02
+        self._set_blinking(show_hazard)
+        self._redraw()
+
+    def _set_blinking(self, on):
+        if on and self._blink_ev is None:
+            self._blink_on = True
+            self._blink_ev = Clock.schedule_interval(self._blink, 0.6)
+        elif not on and self._blink_ev is not None:
+            self._blink_ev.cancel()
+            self._blink_ev = None
+            self._blink_on = True
+
+    def _blink(self, _dt):
+        self._blink_on = not self._blink_on
+        self._redraw()
+
+    # --- drawing -------------------------------------------------------
+    def _redraw(self, *_a):
+        self.canvas.clear()
+        x, y = self.pos
+        w, h = self.size
+        if w <= 0 or h <= 0:
+            return
+
+        # Technivorm Moccamaster thermal carafe silhouette (traced from the
+        # product photo).  Distinctive features:
+        #   - body tapers OUTWARD toward the base (A-line: wider at bottom)
+        #   - black base ring at the bottom
+        #   - wide black flip-lid on top with a pour spout on the LEFT
+        #   - an angular, cantilevered handle on the RIGHT, attached only at
+        #     the top: it juts right then drops straight down, squared off,
+        #     ending free (does NOT loop back to the body)
+        # All proportions relative to the widget box.
+        cx = x + w * 0.46  # body center (left of middle;
+        top_w = w * 0.34  #   handle occupies the right)
+        base_w = w * 0.44  # base wider than top -> taper
+        body_h = h * 0.64
+        by = y + h * 0.06  # bottom of the steel body
+        top = by + body_h
+
+        tl, tr = cx - top_w / 2, cx + top_w / 2  # top left/right
+        bl, br = cx - base_w / 2, cx + base_w / 2  # base left/right
+        # body trapezoid (CCW): bottom-left, bottom-right, top-right, top-left
+        body_pts = [bl, by, br, by, tr, top, tl, top]
+
+        base_h = h * 0.045
+        lid_w = top_w * 1.12
+        lid_h = h * 0.075
+        lx = cx - lid_w / 2
+        ly = top - lid_h * 0.20
+
+        with self.canvas:
+            # --- angular cantilevered handle on the right (drawn first so
+            # the body overlaps its inner end).  Juts right from the top,
+            # then drops straight down; squared, chunky, ends free. ---
+            Color(*GRAPHITE)
+            hb = dp(6)  # handle bar thickness
+            h_top = top - lid_h * 0.15  # height of the top bar
+            h_out = br + w * 0.13  # outer edge of the vertical arm
+            h_bot = by + body_h * 0.34  # bottom of the vertical arm
+            Line(
+                points=[cx, h_top, h_out, h_top, h_out, h_bot],
+                width=hb,
+                joint="miter",
+                cap="square",
+            )
+
+            # --- steel body (tapered), filled to its exact trapezoid ---
+            Color(*STEEL)
+            self._poly(body_pts)
+
+            # --- coffee fill: a trapezoidal slice from the base up, so the
+            # liquid follows the body taper (wider at the bottom).  When the
+            # pot is expired we deliberately draw it EMPTY (no fill): brown
+            # just looks like coffee, so we let the biohazard symbol in an
+            # empty steel carafe carry the "don't drink this" message. ---
+            if self._fill > 0.01 and not self._expired:
+                inset = dp(5)
+                fh = (body_h - 2 * inset) * self._fill
+                yb = by + inset
+                yt = yb + fh
+                # interpolate body half-width at yb and yt
+
+                def half_w(yy):
+                    t = (yy - by) / body_h
+                    bw = (base_w - top_w) * (1 - t) + top_w
+                    return bw / 2 - inset
+
+                Color(*self._coffee)
+                self._poly(
+                    [
+                        cx - half_w(yb),
+                        yb,
+                        cx + half_w(yb),
+                        yb,
+                        cx + half_w(yt),
+                        yt,
+                        cx - half_w(yt),
+                        yt,
+                    ]
+                )
+
+            # --- body outline (over the fill for a crisp steel edge) ---
+            Color(*INK)
+            Line(points=body_pts + [bl, by], width=dp(1.6), joint="miter", cap="square")
+
+            # --- base ring ---
+            Color(*GRAPHITE)
+            self._poly(
+                [
+                    bl,
+                    by,
+                    br,
+                    by,
+                    br - base_w * 0.03,
+                    by - base_h,
+                    bl + base_w * 0.03,
+                    by - base_h,
+                ]
+            )
+
+            # --- flip-lid with left pour spout ---
+            Color(*GRAPHITE)
+            RoundedRectangle(pos=(lx, ly), size=(lid_w, lid_h), radius=[lid_h * 0.35])
+            # spout: a small triangle off the lid's left edge
+            self._poly(
+                [
+                    lx,
+                    ly + lid_h * 0.15,
+                    lx - lid_w * 0.16,
+                    ly + lid_h * 0.55,
+                    lx,
+                    ly + lid_h * 0.9,
+                ]
+            )
+
+        # Biohazard overlay: expired AND coffee still present (fill>0 means
+        # there's old coffee to dump; an expired *empty* pot is just empty).
+        # The carafe is drawn empty above, so the blinking symbol sits in an
+        # empty steel body -- "gone bad, don't drink".
+        if self._expired and self._fill > 0.02:
+            body_cy = by + body_h * 0.42
+            self._draw_hazard(cx, body_cy, min(top_w, base_w), body_h)
+
+    def _poly(self, pts):
+        """Fill a convex polygon (flat x,y list) via a Mesh triangle fan,
+        so the tapered carafe silhouette is filled exactly rather than by a
+        bounding box.  Uses the polygon centroid as the fan hub."""
+        xs = pts[0::2]
+        ys = pts[1::2]
+        cx = sum(xs) / len(xs)
+        cy = sum(ys) / len(ys)
+        verts = [cx, cy, 0, 0]
+        n = len(xs)
+        for i in range(n):
+            verts += [xs[i], ys[i], 0, 0]
+        # fan indices: center, each edge vertex, wrapping back to the first
+        indices = []
+        for i in range(1, n + 1):
+            nxt = i + 1 if i < n else 1
+            indices += [0, i, nxt]
+        Mesh(vertices=verts, indices=indices, mode="triangles")
+
+    def _draw_hazard(self, cxc, cyc, ref_w, ref_h):
+        # Blinking biohazard symbol placed INSIDE the carafe body.  No scrim
+        # and no caption widget (the Home status line already says "Stale
+        # coffee - please dump"); the yellow trefoil (transparent PNG) sits
+        # in the empty steel body.  `cxc, cyc` is the symbol center.
+        if self._blink_on and self._hazard_tex is not None:
+            side = min(ref_w * 0.86, ref_h * 0.5)
+            sx = cxc - side / 2.0
+            sy = cyc - side / 2.0
+            with self.canvas:
+                Color(1, 1, 1, 1)  # texture already carries its own color
+                Rectangle(texture=self._hazard_tex, pos=(sx, sy), size=(side, side))
+
+
+class Header(BoxLayout):
+    """Small top bar: back button (optional) + screen title."""
+
+    def __init__(self, text, on_back=None, **kwargs):
+        super().__init__(
+            orientation="horizontal",
+            size_hint_y=None,
+            height=dp(56),
+            padding=[dp(12), 0],
+            spacing=dp(8),
+            **kwargs
+        )
+        if on_back:
+            back = FlatButton(
+                text="< Back",
+                bg=BG,
+                fg=ACCENT,
+                size_hint_x=None,
+                width=dp(120),
+                font_size=sp(18),
+            )
+            back.bind(on_release=lambda *_a: on_back())
+            self.add_widget(back)
+        else:
+            self.add_widget(Widget(size_hint_x=None, width=dp(120)))
+        self.add_widget(Label(text=text, color=MUTED, font_size=sp(18)))
+        self.add_widget(Widget(size_hint_x=None, width=dp(120)))
+
+
+# --- Home ----------------------------------------------------------------
+# Faked physical pot states, cycled by tapping the status card.  These
+# reflect what is physically on the scale, NOT any monitoring session --
+# so a stale pot keeps showing here (a "someone dump the old pot" nag)
+# even after the brew session's 3h timeout.
+# Each faked state: (key, text color, status text, carafe fill 0..1,
+# coffee color, expired?).  fill<0 means "no carafe on the scale".
+# Per-state text color for the Home status line, keyed by PotState.key.
+STATE_COLOR = {
+    "no_pot": MUTED,
+    "empty": MUTED,
+    "fresh": GREEN,
+    "aging": AMBER,
+    "brewing": ACCENT,
+    "stale": AMBER,
+}
+
+
+# Canned states for --mock mode (tap the carafe to cycle through them).
+def mock_states():
+    return [
+        potstate.PotState("no_pot", "No pot on scale", 0.0, False),
+        potstate.PotState("empty", "Empty pot", 0.02, False),
+        potstate.PotState("fresh", "Coffee: ~0.94 L - fresh (12 min)", 0.75, False),
+        potstate.PotState("brewing", "Brewing - 3 min", 0.40, False),
+        potstate.PotState("aging", "Coffee: ~0.70 L - aging (2h 10m)", 0.56, False),
+        potstate.PotState("stale", "Stale coffee - please dump (4h 20m)", 0.60, True),
+    ]
+
+
+class HomeScreen(Screen):
+    def __init__(self, go, app, **kwargs):
+        super().__init__(**kwargs)
+        self.go = go
+        self.app = app  # for source.poll(), notify(), settings
+        self._latched_expired = False  # stale hazard stays until acknowledged
+        self._last_key = None  # for wake-on-event edge detection
+        root = BoxLayout(orientation="vertical", padding=dp(24), spacing=dp(16))
+
+        # top bar: title centered across the FULL width (badge + settings
+        # float over the ends), so the wordmark is truly screen-centered.
+        top = FloatLayout(size_hint_y=None, height=dp(52))
+        title = Label(
+            text="B R E W C O P",
+            color=GREEN,
+            font_size=sp(28),
+            bold=True,
+            halign="center",
+            valign="middle",
+            size_hint=(1, 1),
+            pos_hint={"x": 0, "y": 0},
+        )
+        title.bind(size=lambda w, s: setattr(w, "text_size", s))
+        top.add_widget(title)
+        # Flux mark at the left (falls back to nothing if the asset is
+        # missing, so the layout still holds).
+        if os.path.exists(FLUX_MARK_PNG):
+            badge = ImageWidget(
+                source=FLUX_MARK_PNG,
+                size_hint=(None, None),
+                size=(dp(44), dp(44)),
+                allow_stretch=True,
+                keep_ratio=True,
+                pos_hint={"x": 0, "center_y": 0.5},
+            )
+            top.add_widget(badge)
+        gear = FlatButton(
+            text="Settings",
+            bg=BG,
+            fg=ACCENT,
+            size_hint=(None, None),
+            size=(dp(110), dp(40)),
+            pos_hint={"right": 1, "center_y": 0.5},
+            font_size=sp(16),
+        )
+        gear.bind(on_release=lambda *_a: go("settings"))
+        top.add_widget(gear)
+        root.add_widget(top)
+
+        # carafe centerpiece (tap anywhere on it to cycle faked states)
+        center = FloatLayout()
+        self.carafe = CarafeWidget(size_hint=(None, None))
+
+        def _place_carafe(*_a):
+            # square-ish, centered, sized to the available center area
+            side = min(center.width * 0.6, center.height * 0.82)
+            self.carafe.size = (side, side * 1.05)
+            self.carafe.pos = (
+                center.x + (center.width - self.carafe.width) / 2,
+                center.y + (center.height - self.carafe.height) / 2,
+            )
+
+        center.bind(pos=_place_carafe, size=_place_carafe)
+        center.add_widget(self.carafe)
+        root.add_widget(center)
+
+        # persistent pot-status line
+        self.status = Label(
+            text="", font_size=sp(20), bold=True, size_hint_y=None, height=dp(40)
+        )
+        root.add_widget(self.status)
+
+        # In --mock mode only, a strip to advance the canned states.
+        if self.app.mock:
+            cycle = FlatButton(
+                text="(mock: tap to cycle states)",
+                bg=BG,
+                fg=MUTED,
+                font_size=sp(12),
+                size_hint_y=None,
+                height=dp(24),
+            )
+            cycle.bind(on_release=lambda *_a: self._cycle())
+            root.add_widget(cycle)
+
+        # Bottom action button.  Normally "WEIGH BEANS" (the only interactive
+        # mode, since monitoring is always-on).  When a pot is stale, it
+        # becomes "MARK CLEANED": the biohazard latches until a human
+        # confirms the pot was dealt with -- so a top-up (weight rising)
+        # can't silently clear a contaminated pot.
+        self.action = FlatButton(
+            text="WEIGH BEANS",
+            bg=ACCENT,
+            fg=(1, 1, 1, 1),
+            font_size=sp(26),
+            bold=True,
+            size_hint_y=None,
+            height=dp(96),
+        )
+        self.action.bind(on_release=lambda *_a: self._action())
+        root.add_widget(self.action)
+
+        self.add_widget(root)
+        self._pot = potstate.PotState("no_pot", "", 0.0, False)
+        self.tick()
+
+    def tick(self, *_a):
+        """Poll the source, latch a stale hazard, render, fire events."""
+        # Don't poll the shared serial port while another screen (Weigh) is
+        # polling it directly -- two readers would corrupt each other's ECR
+        # responses.  Home only ticks while it is the visible screen.
+        if self.manager is not None and self.manager.current != self.name:
+            return
+        result = self.app.source.poll()
+        pot = result.pot_state
+
+        # Latch the stale hazard: once stale, keep showing it until the user
+        # presses MARK CLEANED -- a weight rise (top-up) must not clear it.
+        if pot.expired:
+            self._latched_expired = True
+
+        self._pot = pot
+        self._render(pot)
+
+        # Notify + wake on the brewing->ready transition (app gates Slack).
+        if result.event == "ready":
+            self.app.on_ready_event(result)
+        # Wake the screen on any state change worth noticing.
+        if pot.key != self._last_key:
+            self.app.wake(pot)
+        self._last_key = pot.key
+
+    def _cycle(self):
+        # --mock only: advance canned states.  Also clears any latch, so the
+        # stale->(cycle) path behaves.
+        self._latched_expired = False
+        self.app.source.advance()
+        self.tick()
+
+    def _action(self):
+        # Stale -> acknowledge cleaning; otherwise open the bean scale.
+        if self._showing_stale():
+            self._mark_cleaned()
+        else:
+            self.go("weigh")
+
+    def _mark_cleaned(self):
+        # Human confirmed the pot was dealt with: drop the latch.  Next tick
+        # reflects the real scale state (or, in mock, the current state).
+        self._latched_expired = False
+        if self.app.mock:
+            self.app.source.advance()
+        self.tick()
+
+    def _showing_stale(self):
+        return self._latched_expired or self._pot.expired
+
+    def _render(self, pot):
+        expired = self._showing_stale()
+        color = STATE_COLOR.get(pot.key, INK)
+        self.status.text = pot.text
+        self.status.color = color
+
+        if pot.key == "no_pot":
+            # Nothing on the scale: blank centerpiece, no ghost carafe.
+            self.carafe.set_state(0.0, GREEN, False)
+            self.carafe.opacity = 0.0
+        else:
+            self.carafe.opacity = 1.0
+            coffee = AMBER if pot.key == "aging" else GREEN
+            self.carafe.set_state(pot.fill, coffee, expired)
+
+        # Bottom button: MARK CLEANED while stale, else WEIGH BEANS.
+        if expired:
+            self.action.text = "MARK CLEANED"
+            self.action._bg_rgba = HAZARD
+            self.action._bg_color.rgba = HAZARD
+            self.action.color = (0.1, 0.1, 0.1, 1)
+        else:
+            self.action.text = "WEIGH BEANS"
+            self.action._bg_rgba = ACCENT
+            self.action._bg_color.rgba = ACCENT
+            self.action.color = (1, 1, 1, 1)
+
+
+# --- Weigh ---------------------------------------------------------------
+class WeighScreen(Screen):
+    def __init__(self, go, app, **kwargs):
+        super().__init__(**kwargs)
+        self.app = app
+        self.config = app.settings
+        self.units = "g"
+        self._grams = 0.0  # last live reading (raw grams, pre-tare)
+        self._offset = 0.0  # tare offset
+        self._poll_ev = None
+        root = BoxLayout(orientation="vertical")
+        root.add_widget(Header("WEIGH", on_back=lambda: go("home")))
+
+        body = BoxLayout(orientation="vertical", padding=dp(24), spacing=dp(16))
+
+        self.readout = Label(text="", color=GREEN, font_size=sp(96), bold=True)
+        body.add_widget(self.readout)
+
+        units = BoxLayout(
+            orientation="horizontal", spacing=dp(12), size_hint_y=None, height=dp(64)
+        )
+        self.btn_g = FlatButton(text="grams", font_size=sp(20))
+        self.btn_oz = FlatButton(text="ounces", font_size=sp(20))
+        self.btn_g.bind(on_release=lambda *_a: self._set_units("g"))
+        self.btn_oz.bind(on_release=lambda *_a: self._set_units("oz"))
+        units.add_widget(self.btn_g)
+        units.add_widget(self.btn_oz)
+        body.add_widget(units)
+
+        tare = FlatButton(
+            text="TARE",
+            bg=ACCENT,
+            fg=(1, 1, 1, 1),
+            font_size=sp(24),
+            bold=True,
+            size_hint_y=None,
+            height=dp(72),
+        )
+        tare.bind(on_release=lambda *_a: self._tare())
+        body.add_widget(tare)
+
+        # Dosing hint -- computed from the configured pot capacity (see
+        # _refresh_hint), so it tracks the "Pot capacity" setting.
+        hint = BoxLayout(
+            orientation="vertical", padding=dp(16), size_hint_y=None, height=dp(96)
+        )
+        _fill(hint, PANEL, radius=dp(10))
+        self.hint_cap = Label(
+            text="", color=MUTED, font_size=sp(16), size_hint_y=None, height=dp(24)
+        )
+        hint.add_widget(self.hint_cap)
+        self.hint_beans = Label(text="", color=INK, font_size=sp(22), bold=True)
+        hint.add_widget(self.hint_beans)
+        body.add_widget(hint)
+
+        root.add_widget(body)
+        self.add_widget(root)
+        self._set_units("g")
+        self._refresh_hint()
+
+    def on_pre_enter(self, *_a):
+        # Recompute the dosing hint (pot capacity may have changed), and poll
+        # the scale live while this screen is showing.
+        self._refresh_hint()
+        if self._poll_ev is None:
+            self._poll_ev = Clock.schedule_interval(self._poll, 0.5)
+
+    def on_leave(self, *_a):
+        if self._poll_ev is not None:
+            self._poll_ev.cancel()
+            self._poll_ev = None
+
+    def _poll(self, *_a):
+        try:
+            self.app.scale.poll()
+            if self.app.scale.weight_is_valid:
+                self._grams = self.app.scale.weight
+        except Exception:
+            pass  # keep last reading on a transient serial hiccup
+        self._refresh()
+
+    def _refresh_hint(self):
+        cap = self.config["pot_capacity_ml"]
+        # SCA "golden ratio" ~1:18 by weight (1 g coffee per 18 g/mL water);
+        # show a mild->strong band from 1:20 to 1:16 around the 1:18 anchor.
+        self.hint_cap.text = "Full {:.2f} L pot".format(cap / 1000.0)
+        self.hint_beans.text = "~{:.0f}-{:.0f} g beans   (SCA 1:18 = {:.0f} g)".format(
+            cap / 20.0, cap / 16.0, cap / 18.0
+        )
+
+    def _set_units(self, u):
+        self.units = u
+        self._refresh()
+
+    def _tare(self):
+        self._offset = self._grams
+        self._refresh()
+
+    def _refresh(self):
+        net = self._grams - self._offset
+        if self.units == "g":
+            self.readout.text = "{:.0f} g".format(net)
+        else:
+            self.readout.text = "{:.2f} oz".format(net / 28.3495)
+        self.btn_g.color = ACCENT if self.units == "g" else INK
+        self.btn_oz.color = ACCENT if self.units == "oz" else INK
+
+
+# --- Settings ------------------------------------------------------------
+def setting_label(text, markup=False):
+    """Left-aligned row title used identically by every settings row, so the
+    left edges line up.  halign only takes effect once text_size is bound to
+    the widget size."""
+    lbl = Label(
+        text=text,
+        color=INK,
+        font_size=sp(18),
+        markup=markup,
+        halign="left",
+        valign="middle",
+    )
+    lbl.bind(size=lambda w, s: setattr(w, "text_size", s))
+    return lbl
+
+
+class StepperRow(BoxLayout):
+    """A compact numeric setting: name on the left, then a [-] value [+]
+    stepper.  Touch-friendly and precise -- one row per setting, far less
+    vertical space and fussiness than a slider."""
+
+    def __init__(self, name, config, key, vmin, vmax, step, fmt, note="", **kwargs):
+        super().__init__(
+            orientation="horizontal",
+            size_hint_y=None,
+            height=dp(60),
+            spacing=dp(8),
+            **kwargs
+        )
+        self.config = config
+        self.key = key
+        self.vmin, self.vmax, self.step, self.fmt = vmin, vmax, step, fmt
+
+        # Name with optional inline note (e.g. scale tolerance) via markup,
+        # kept on ONE line to conserve vertical space.
+        text = name
+        if note:
+            text += "  [color=888888][size=13]{}[/size][/color]".format(note)
+        self.add_widget(setting_label(text, markup=True))
+
+        minus = FlatButton(
+            text="-",
+            bg=PANEL,
+            font_size=sp(30),
+            bold=True,
+            size_hint_x=None,
+            width=dp(56),
+        )
+        minus.bind(on_release=lambda *_a: self._step(-1))
+        self.add_widget(minus)
+
+        self.value_lbl = Label(
+            text="",
+            color=ACCENT,
+            font_size=sp(20),
+            bold=True,
+            size_hint_x=None,
+            width=dp(96),
+            halign="center",
+            valign="middle",
+        )
+        self.value_lbl.bind(size=lambda w, s: setattr(w, "text_size", s))
+        self.add_widget(self.value_lbl)
+
+        plus = FlatButton(
+            text="+",
+            bg=PANEL,
+            font_size=sp(30),
+            bold=True,
+            size_hint_x=None,
+            width=dp(56),
+        )
+        plus.bind(on_release=lambda *_a: self._step(+1))
+        self.add_widget(plus)
+
+        self._render()
+
+    def _step(self, sign):
+        v = self.config[self.key] + sign * self.step
+        v = max(self.vmin, min(self.vmax, v))
+        # round to the step grid to avoid float drift
+        v = round(v / self.step) * self.step
+        self.config[self.key] = v
+        self._render()
+
+    def _render(self):
+        self.value_lbl.text = self.fmt(self.config[self.key])
+
+
+class ToggleRow(BoxLayout):
+    """A labeled on/off toggle for a boolean config key."""
+
+    def __init__(self, name, config, key, **kwargs):
+        super().__init__(
+            orientation="horizontal",
+            size_hint_y=None,
+            height=dp(60),
+            spacing=dp(12),
+            **kwargs
+        )
+        self.config = config
+        self.key = key
+        self.add_widget(setting_label(name))
+        self.btn = FlatButton(
+            text="",
+            bg=PANEL,
+            font_size=sp(18),
+            bold=True,
+            size_hint_x=None,
+            width=dp(120),
+        )
+        self.btn.bind(on_release=lambda *_a: self._toggle())
+        self.add_widget(self.btn)
+        self._render()
+
+    def _toggle(self):
+        self.config[self.key] = not self.config[self.key]
+        self._render()
+
+    def _render(self):
+        on = bool(self.config[self.key])
+        self.btn.text = "ON" if on else "OFF"
+        self.btn.color = GREEN if on else MUTED
+
+
+class SettingsScreen(Screen):
+    def __init__(self, go, config, **kwargs):
+        super().__init__(**kwargs)
+        self.config = config
+        root = BoxLayout(orientation="vertical")
+        root.add_widget(Header("SETTINGS", on_back=lambda: go("home")))
+
+        # Scrollable list of setting rows, so it can never overflow into the
+        # header no matter how many rows or what the screen orientation is.
+        rows = BoxLayout(
+            orientation="vertical",
+            padding=[dp(24), dp(8)],
+            spacing=dp(10),
+            size_hint_y=None,
+        )
+        rows.bind(minimum_height=rows.setter("height"))
+
+        rows.add_widget(ToggleRow("Slack announcements", config, "slack_enabled"))
+        rows.add_widget(
+            StepperRow(
+                "Stale timeout",
+                config,
+                "stale_hours",
+                1.0,
+                8.0,
+                0.5,
+                lambda v: "{:.1f} h".format(v),
+            )
+        )
+        tol = "+/- {} g".format(POT_TOLERANCE_G)
+        rows.add_widget(
+            StepperRow(
+                "Empty pot threshold",
+                config,
+                "empty_thresh_g",
+                0,
+                200,
+                1,
+                lambda v: "{:.0f} g".format(v),
+                note=tol,
+            )
+        )
+        rows.add_widget(
+            StepperRow(
+                "Pot tare (empty carafe)",
+                config,
+                "pot_tare_g",
+                700,
+                900,
+                1,
+                lambda v: "{:.0f} g".format(v),
+                note=tol,
+            )
+        )
+        rows.add_widget(
+            StepperRow(
+                "Pot capacity",
+                config,
+                "pot_capacity_ml",
+                1000,
+                1500,
+                10,
+                lambda v: "{:.0f} mL".format(v),
+            )
+        )
+
+        scroll = ScrollView(do_scroll_x=False)
+        scroll.add_widget(rows)
+        root.add_widget(scroll)
+
+        # Save area pinned below the scroll list.
+        self.save_msg = Label(
+            text="", color=GREEN, font_size=sp(14), size_hint_y=None, height=dp(22)
+        )
+        root.add_widget(self.save_msg)
+
+        save = FlatButton(
+            text="SAVE",
+            bg=ACCENT,
+            fg=(1, 1, 1, 1),
+            font_size=sp(24),
+            bold=True,
+            size_hint_y=None,
+            height=dp(64),
+        )
+        save.bind(on_release=lambda *_a: self._save())
+        root.add_widget(save)
+
+        self.add_widget(root)
+
+    def _save(self):
+        try:
+            self.config.save()
+            self.save_msg.color = GREEN
+            self.save_msg.text = "Saved."
+        except OSError as e:
+            self.save_msg.color = RED
+            self.save_msg.text = "Save failed: {}".format(e)
+
+
+TICK_PERIOD = 0.5  # seconds between Home scale polls
+
+
+class BrewcopApp(App):
+    title = "brewcop"
+
+    def __init__(self, mock=False, **kwargs):
+        super().__init__(**kwargs)
+        self.mock = mock
+
+    def build(self):
+        # Config: machine facts (read-only) + user settings (writable).
+        self.machine = machineconfig.load()
+        self.settings = usersettings.UserSettings()
+
+        # Scale + brew source.  --mock uses canned states and no hardware.
+        if self.mock:
+            self.scale = NoScale()
+            self.source = brewsource.MockBrewSource(mock_states())
+        else:
+            self.scale, err = open_scale(self.machine.serial_port)
+            if err:
+                # Not fatal: fall back to NoScale so the UI still comes up.
+                print(
+                    "scale: {} (running without hardware)".format(err), file=sys.stderr
+                )
+            self.source = brewsource.ScaleBrewSource(
+                self.scale, self.settings, tick_period=TICK_PERIOD
+            )
+
+        # Backlight (safe no-op if the sysfs node is absent/unwritable).
+        self.backlight = Backlight()
+        self._dimmed = False
+        self._idle_ev = None
+
+        Window.clearcolor = BG
+        if Window is not None:
+            Window.bind(on_key_down=self._on_key_down)
+            Window.bind(on_touch_down=self._on_touch)
+
+        self.sm = ScreenManager(transition=SlideTransition(duration=0.2))
+        go = self._go
+        self.home = HomeScreen(go, self, name="home")
+        self.sm.add_widget(self.home)
+        self.sm.add_widget(WeighScreen(go, self, name="weigh"))
+        self.sm.add_widget(SettingsScreen(go, self.settings, name="settings"))
+
+        # Drive the Home brew tick continuously (Home is the always-on view).
+        # In --mock, don't auto-advance: the user taps to cycle.
+        if not self.mock:
+            Clock.schedule_interval(self.home.tick, TICK_PERIOD)
+
+        self._reset_idle_timer()
+        return self.sm
+
+    # --- events from the Home screen ----------------------------------
+    def on_ready_event(self, result):
+        """A brewing->ready transition happened.  Notify Slack IF enabled."""
+        self.wake(result.pot_state)
+        if not self.settings["slack_enabled"]:
+            return
+        url = self.machine.slack_webhook_url
+        if not url:
+            return
+        self._notify_slack(url, result)
+
+    def _notify_slack(self, url, result):
+        # Imported lazily so the app runs without requests on a dev box.
+        try:
+            import requests
+
+            ml = result.raw_grams or 0.0  # ~1 g per mL
+            msg = "{:.0f} mL of fresh coffee is ready in {}.".format(
+                ml, self.machine.location
+            )
+            requests.post(url, json={"text": msg}, timeout=5)
+        except Exception as e:
+            print("slack notify failed: {}".format(e), file=sys.stderr)
+
+    # --- backlight inactivity dimming ---------------------------------
+    def wake(self, pot=None):
+        """Brighten to full and restart the idle timer."""
+        if self._dimmed:
+            self.backlight.set_level(1.0)
+            self._dimmed = False
+        self._reset_idle_timer()
+
+    def _reset_idle_timer(self):
+        if self._idle_ev is not None:
+            self._idle_ev.cancel()
+            self._idle_ev = None
+        timeout = self.settings["dim_timeout_s"]
+        if timeout and timeout > 0:
+            self._idle_ev = Clock.schedule_once(self._dim, timeout)
+
+    def _dim(self, *_a):
+        self.backlight.set_level(self.settings["dim_level"])
+        self._dimmed = True
+
+    def _on_touch(self, _window, touch):
+        # Any touch wakes the screen.  If we were dimmed, swallow this touch
+        # so waking doesn't also trigger the widget under the finger.
+        if self._dimmed:
+            self.wake()
+            return True
+        self._reset_idle_timer()
+        return False
+
+    def _go(self, name):
+        self.sm.transition.direction = "right" if name == "home" else "left"
+        self.sm.current = name
+
+    def _on_key_down(self, _w, key, *_a):
+        if key in (113, 27):  # q / Escape
+            self.stop()
             return True
         return False
 
-    @property
-    def display(self):
-        """
-        Get formatted text for scale readout.
-        Gray out previous value if scale is in motion.
-        Show red over/under on scale range error.
-        """
-        if self._weight_is_valid:
-            return ("green", "{:.0f}g".format(self._weight - self.tare_offset))
-        elif self.ecr_status == b"10" or self.ecr_status == b"30":  # moving
-            return ("deselect", "{:.0f}g".format(self._weight - self.tare_offset))
-        elif self.ecr_status == b"01" or self.ecr_status == b"11":
-            return ("red", "under")
-        elif self.ecr_status == b"02":
-            return ("red", "over")
-        else:
-            return ("red", "status:" + self.ecr_status.decode("utf-8"))
 
-    @property
-    def weight_is_valid(self):
-        """Return True if most recent poll() returned a valid weight."""
-        return self._weight_is_valid
-
-    @property
-    def weight(self):
-        """Return most recently measured weight, less tare offset if any."""
-        return self._weight - self.tare_offset
+def parse_args(argv):
+    p = argparse.ArgumentParser(description="brewcop touchscreen app")
+    p.add_argument(
+        "--mock", action="store_true", help="use canned states, no scale hardware"
+    )
+    p.add_argument(
+        "--windowed", action="store_true", help="run in a window (dev), not fullscreen"
+    )
+    return p.parse_args(argv)
 
 
-# For testing UI without scale present
-class NoScale(Scale):
-    """
-    Dummy version of scale class for UI testing.
-    """
-
-    def __init__(self):
-        self._weight = 0.0
-        self._weight_is_valid = True
-        self.ecr_status = None
-        self.tare_offset = 0.0
-        return
-
-    def poll(self):
-        return
-
-    def zero(self):
-        return
-
-    @property
-    def display(self):
-        return ("deselect", "no scale")
-
-
-class Progress_mL(urwid.ProgressBar):
-    """
-    Progress bar that displays mL value instead of percentage.
-    It assumes range was set to (0, max capacity in mL).
-    """
-
-    def get_text(self):
-        return "{:.0f} mL".format(self.current)
-
-
-class DisplayHelper:
-
-    """
-    Urwid color palette.
-    Tuples of (Key, font color, background color)
-    """
-
-    palette = [
-        ("background", "dark blue", ""),
-        ("deselect", "dark gray", ""),
-        ("select", "dark green", ""),
-        ("green", "dark green", ""),
-        ("red", "dark red", ""),
-        ("pb_todo", "black", "dark red"),
-        ("pb_done", "black", "dark green"),
-    ]
-    """
-    Source: https://www.asciiart.eu/food-and-drinks/coffee-and-tea
-    N.B. this one had no attribution on that site except author's initials,
-    and it seems to be widely disseminated.  Public domain?
-    """
-    coffee_cup = u'''\
-                      (
-                        )     (
-                 ___...(-------)-....___
-             .-""       )    (          ""-.
-       .-'``'|-._             )         _.-|
-      /  .--.|   `""---...........---""`   |
-     /  /    |                             |
-     |  |    |                             |
-      \  \   |                             |
-       `\ `\ |                             |
-         `\ `|                             |
-         _/ /\                             /
-        (__/  \                           /
-     _..---""` \                         /`""---.._
-  .-'           \                       /          '-.
- :               `-.__             __.-'              :
- :                  ) ""---...---"" (                 :
-  '._               `"--...___...--"`              _.'
-jgs \""--..__                              __..--""/
-     '._     """----.....______.....----"""     _.'
-        `""--..,,_____            _____,,..--""`
-                      `"""----"""`
-'''
-
-    def __init__(self, pot_capacity_mL=100):
-        # header
-        headL = urwid.Text(("green", "B R E W C O P"), align="left")
-        self._headC = urwid.Text("", align="center")
-        self._headR = indicator = urwid.Text("", align="right")
-        self.header = urwid.Columns([headL, self._headC, self._headR], 3)
-
-        # body
-        bg = urwid.Text(self.coffee_cup)
-        bg = urwid.AttrMap(bg, "background")
-        bg = urwid.Padding(bg, align="center", width=56)
-        self.background = urwid.Filler(bg)
-
-        # body + meter pop-up (offline mode)"""
-        self._meter = urwid.BigText("", urwid.Thin6x6Font())
-        m = urwid.AttrMap(self._meter, "green")
-        m = urwid.Padding(m, align="center", width="clip")
-        m = urwid.Filler(m, "bottom", None, 7)
-        m = urwid.LineBox(m)
-        self.meterbody = urwid.Overlay(m, self.background, "center", 50, "middle", 8)
-
-        # footer
-        self.pbar = Progress_mL("pb_todo", "pb_done", 0, pot_capacity_mL)
-        self.footmsg = urwid.Text(
-            ("red", "Brewcop is offline. Replace pot to continue monitoring."),
-            align="center",
-        )
-
-        self.layout = urwid.Frame(
-            header=self.header, body=self.meterbody, footer=self.footmsg
-        )
-
-        self.main_loop = urwid.MainLoop(
-            self.layout, self.palette, unhandled_input=self.handle_input
-        )
-
-    def handle_input(self, key):
-        """
-        urwid's event loop calls this function on keyboard events
-        not handled by widgets.
-        """
-        if key == "Q" or key == "q":
-            raise urwid.ExitMainLoop()
-
-    def tick_wrap(self, _loop, _data):
-        """
-        urwid timer callback to run registered "tick" function periodically.
-        """
-        self.ticker()
-        _loop.set_alarm_in(self.tick_period, self.tick_wrap)
-
-    def run(self, ticker, tick_period):
-        """
-        Register ticker callable, to run every tick_period seconds.
-        Start urwid's main loop.
-        This method does not return until loop exits (press q).
-        """
-        self.ticker = ticker
-        self.tick_period = tick_period
-        self.main_loop.set_alarm_in(0, self.tick_wrap)
-        self.main_loop.run()
-
-    def redraw(self):
-        """
-        Force screen redraw.
-        It normally redraws when control returns to event loop.
-        """
-        self.main_loop.draw_screen()
-
-    @property
-    def headC(self):
-        """Get text from header, center region"""
-        return self._headC.get_text()
-
-    @headC.setter
-    def headC(self, value):
-        """Set text in header, center region"""
-        self._headC.set_text(value)
-
-    @property
-    def headR(self):
-        """Get text from header, right region"""
-        return self._headR.get_text()
-
-    @headR.setter
-    def headR(self, value):
-        """Set text in header, right region"""
-        self._headR.set_text(value)
-
-    @property
-    def meter(self):
-        """Get the meter text (scale reading)"""
-        return self._meter.get_text()
-
-    @meter.setter
-    def meter(self, value):
-        """Set the meter text (scale reading)"""
-        self._meter.set_text(value)
-
-    def online(self):
-        """Set online display mode (show background + footer progress bar)"""
-        self.layout.body = self.background
-        self.layout.footer = self.pbar
-
-    def offline(self):
-        """Set offline display mode (show meter + footer message)"""
-        self.layout.body = self.meterbody
-        self.layout.footer = self.footmsg
-
-    def progress(self, value):
-        """Update progress bar value (pot contents in mL)"""
-        self.pbar.set_completion(value)
-
-
-class Brains:
-    """
-    Add some scale memory and semantics for interpreting a series
-    of weights as human activity.
-
-    Implement a state machine consisting of the following states:
-    unknown - no scale readings stored yet
-    brewing - scale readings have shown some increase over last 30s
-    ready - scale readings are stable/decreasing and pot still has content
-    empty - scale readings are stable/decreasing and pot content is low
-    """
-
-    """Retain scale samples for history_length seconds"""
-    history_length = 30
-
-    def __init__(self, tick_period=1, empty_thresh=0, stale_thresh=60 * 60 * 8):
-        self.history = deque(maxlen=int(self.history_length / tick_period))
-        self.pot_empty_thresh_g = empty_thresh
-        self.stale_thresh = stale_thresh
-        self.state = "unknown"
-        self.timestamp = 0
-
-    def ready_message (self, grams):
-        template = random.choice([
-            "{:.1f}mL of hot, fresh coffee is ready for consumption in B451.",
-            "Please drink the {:.1f}mL of coffee in B451.  You have 20 seconds to comply.",
-            "You must consume the {:.1f}mL of coffee or be terminated.",
-            "{:.1f}mL of human productivity beverage is available for consumption in B451",
-            "{:.1f}mL of nootropic brown liquid is available for consumption.",
-        ])
-        return template.format(grams)
-
-    def notify(self):
-        """Notify slack"""
-        url = os.environ["SLACK_WEBHOOK_URL"]
-        data = {'text' : self.ready_message(self.history[0])}
-        requests.post(url, json=data)
-
-    def increasing(self):
-        """
-        Return true if history shows (any) values increasing relative
-        to a predecessor.
-        N.B. Ignores l[i] < l[i + 1].
-        """
-        l = list(self.history)
-        return any(x > y for x, y in zip(l, l[1:]))
-
-    def brewcheck(self):
-        """
-        Process new scale reading, transitioning state, if needed.
-        Call notify() on brewing->ready state transition.
-        """
-        previous = self.state
-        if self.increasing():
-            if self.state != "brewing":
-                self.state = "brewing"
-                self.timestamp = time.time()
-        elif self.history[0] <= self.pot_empty_thresh_g:
-            if self.state != "empty":
-                self.state = "empty"
-                self.timestamp = time.time()
-        else:
-            if self.state != "ready":
-                self.state = "ready"
-                self.timestamp = time.time()
-                if previous == "brewing":
-                    self.notify()
-
-    def store(self, w):
-        """Record a scale measurement"""
-        self.history.appendleft(w)
-        self.brewcheck()
-
-    def timestr(self, t):
-        """Return a human-friendly string representing elapsed time t"""
-        daysecs = 60 * 60 * 24
-        if t < daysecs:
-            return time.strftime("%H:%M:%S", time.gmtime(t))
-        elif t < daysecs * 2:
-            return "1 day"
-        else:
-            return "{} days".format(int(t / daysecs))
-
-    @property
-    def display(self):
-        """Get message text describing the state, with time since entered"""
-        t = time.time() - self.timestamp
-        timestr = self.timestr(t)
-        if self.state == "brewing":
-            return ("red", "Brewing, elapsed: {}".format(timestr))
-        elif self.state == "ready" and t < self.stale_thresh:
-            return ("green", "Ready, elapsed: {}".format(timestr))
-        elif self.state == "ready":
-            return ("red", "Ready, elapsed: {} (stale)".format(timestr))
-        elif self.state == "empty":
-            return ("red", "Emptyish, elapsed: {}".format(timestr))
-        else:
-            return ""
-
-
-class Brewcop:
-    """
-    Main Brewcop class.
-    """
-
-    tick_period = 0.5
-
-    """Values for Technivorm Moccamaster insulated carafe"""
-    pot_tare_g = 795
-    pot_capacity_g = 1250  # 1g per mL H20
-    pot_empty_thresh_g = 50
-
-    """Declare coffee stale after 4h"""
-    stale_thresh = 60 * 60 * 4
-
-    def __init__(self):
-        try:
-            self.scale = Scale()
-        except:
-            self.scale = NoScale()
-        self.disp = DisplayHelper(pot_capacity_mL=self.pot_capacity_g)
-        self.brains = Brains(
-            tick_period=self.tick_period,
-            empty_thresh=self.pot_empty_thresh_g,
-            stale_thresh=self.stale_thresh,
-        )
-        self._online = False
-
-    @property
-    def online(self):
-        """Get online status (True or False)"""
-        return self._online
-
-    @online.setter
-    def online(self, value):
-        """
-        Set online status (True or False).
-        If online, hide the meter and show coffee progress bar.
-        If offline, show the meter and replace progress bar with offline msg.
-        """
-        if self._online and not value:
-            self._online = False
-            self.disp.offline()
-        elif not self._online and value:
-            self._online = True
-            self.disp.online()
-
-    def poll_scale(self):
-        """
-        Poll the current scale value.
-        Pulse the indicator green so we get visual feedback if this is slow.
-        The urwid event loop is stalled while this is happening.
-        If it fails, leave the indicator red and set the meter value to ----.
-        """
-        self.disp.headR = ("green", "poll")
-        self.disp.redraw()
-        try:
-            self.scale.poll()
-        except:
-            self.disp.headR = ("red", "poll")
-            self.disp.meter = "----"
-        else:
-            self.disp.headR = ""
-            self.disp.meter = self.scale.display
-
-    def tick(self):
-        """
-        urwid's event loop calls this function on tick_period intervals.
-        Read the scale, then update the meter and the progress bar.
-        Switch online mode depending on weight reading.
-        """
-        self.poll_scale()
-        if self.scale.weight_is_valid:
-            w = self.scale.weight - self.pot_tare_g
-            if (w > -4 and w < 4): # +/-4g for variation in actual pot tare
-                w = 0
-            if w < 0:
-                self.online = False
-            else:
-                self.disp.progress(w)
-                self.online = True
-                self.brains.store(w)
-        self.disp.headC = self.brains.display
-
-    def run(self):
-        """Enter urwid's event loop.  Start ticker and handle input"""
-        self.disp.run(self.tick, self.tick_period)
-
-
-brewcop = Brewcop()
-brewcop.run()
+if __name__ == "__main__":
+    args = parse_args(sys.argv[1:])
+    if not args.windowed:
+        Window.fullscreen = "auto"
+    BrewcopApp(mock=args.mock).run()
 
 # vim: tabstop=4 shiftwidth=4 expandtab
