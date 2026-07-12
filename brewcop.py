@@ -48,6 +48,11 @@ import argparse
 import os
 import sys
 
+# Kivy parses sys.argv itself at import time; without this it would choke on
+# our --mock/--windowed flags and print its own usage message.  Must be set
+# before `import kivy`.
+os.environ.setdefault("KIVY_NO_ARGS", "1")
+
 import kivy
 
 from kivy.app import App
