@@ -443,6 +443,7 @@ class HomeScreen(Screen):
         self.app = app  # for source.poll(), notify(), settings
         self._last_key = None  # for wake-on-event edge detection
         self._flashing = False  # suppress status updates while flashing a msg
+        self._half_pot = False  # brew target: half pot vs full (resets each boot)
         root = BoxLayout(orientation="vertical", padding=dp(24), spacing=dp(16))
 
         # top bar: title centered across the FULL width (badge + settings
@@ -529,6 +530,19 @@ class HomeScreen(Screen):
         )
         self.weight_lbl.bind(size=lambda w, s: setattr(w, "text_size", s))
         statusbar.add_widget(self.weight_lbl)
+        # Brew-size selector (left): toggles the target a brew must reach to
+        # count as done.  Resets to full each boot.
+        self.size_btn = FlatButton(
+            text="Full pot",
+            bg=PANEL,
+            fg=INK,
+            font_size=sp(14),
+            size_hint=(None, None),
+            size=(dp(96), dp(34)),
+            pos_hint={"x": 0, "center_y": 0.5},
+        )
+        self.size_btn.bind(on_release=lambda *_a: self._toggle_pot_size())
+        statusbar.add_widget(self.size_btn)
         root.add_widget(statusbar)
 
         # In --mock mode only, a strip to advance the canned states.
@@ -572,7 +586,12 @@ class HomeScreen(Screen):
         # responses.  Home only ticks while it is the visible screen.
         if self.manager is not None and self.manager.current != self.name:
             return
-        result = self.app.source.poll()
+        # Brew-complete target: full pot = capacity, half = capacity/2.  A
+        # brew that settles below target isn't declared done (no "fresh" from
+        # a dribble).
+        capacity = self.app.settings["pot_capacity_ml"]
+        target_g = capacity * (0.5 if self._half_pot else 1.0)
+        result = self.app.source.poll(target_g=target_g)
         pot = result.pot_state
 
         # Dirtiness (the biohazard) is now decided by Brains and carried on
@@ -596,6 +615,10 @@ class HomeScreen(Screen):
         if pot.key != self._last_key:
             self.app.wake(pot)
         self._last_key = pot.key
+
+    def _toggle_pot_size(self):
+        self._half_pot = not self._half_pot
+        self.size_btn.text = "Half pot" if self._half_pot else "Full pot"
 
     def _cycle(self):
         # --mock only: advance canned states.
