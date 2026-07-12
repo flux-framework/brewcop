@@ -75,6 +75,12 @@ class Brains:
     BREW_RATE_MAX_GPS = 30.0  # rise faster than this: a placement, not a brew
     RATE_WINDOW_S = 4.0  # window over which rate is estimated
 
+    # A brew only counts as complete when the settled level reaches its target
+    # (full or half pot), within this margin.  The margin must cover the water
+    # the grounds absorb -- a "full" brew yields somewhat less in the carafe.
+    # Provisional; tune against a real brew trace.
+    BREW_TARGET_MARGIN_G = 150
+
     def __init__(self, tick_period=1, empty_thresh=0, now=time.time):
         # tick_period is accepted for API compatibility but unused: rate is
         # computed from real timestamps over RATE_WINDOW_S, not sample counts.
@@ -85,16 +91,24 @@ class Brains:
         self.ready_time = None  # wall-clock when current coffee became ready
         self.clean_time = None  # wall-clock when the pot was last cleaned
         self.timestamp = 0  # when the current state was entered
+        self._target_g = None  # expected finished-brew level (set per store)
 
-    def store(self, net):
+    def store(self, net, target_g=None):
         """
         Record a contents-weight sample (grams, net of tare) and update state.
         Returns "ready" on a brewing->settled transition, else None.
+
+        target_g is the expected finished-brew level (full or half pot, in
+        grams).  A settle below target_g - BREW_TARGET_MARGIN_G is treated as
+        an incomplete brew, NOT a completed one -- so a dribble on the scale
+        no longer flashes "fresh coffee".  None disables the check (accept any
+        settled brew, the old behavior).
         """
         t = self._now()
         self._samples.append((t, net))
         while self._samples and t - self._samples[0][0] > self.RATE_WINDOW_S:
             self._samples.popleft()
+        self._target_g = target_g
         return self._update(t, net)
 
     def _rate(self):
@@ -127,12 +141,12 @@ class Brains:
         # Otherwise settled: stable, declining (pouring), or a step jump
         # (placement / return / pour-back).  None of these is brewing.
         event = None
-        if prev == "brewing":
-            # A brew just finished on the scale.  Accept it as fresh only if
-            # the pot was cleaned since the last batch; otherwise this is a
-            # brew into a still-dirty pot -- refuse to reset the age clock, so
-            # the pot stays flagged dirty (you must clean it, which means
-            # dumping and rebrewing).
+        if prev == "brewing" and self._reached_target(net):
+            # A brew just finished on the scale AND reached the target level.
+            # Accept it as fresh only if the pot was cleaned since the last
+            # batch; otherwise it's a brew into a still-dirty pot -- refuse to
+            # reset the age clock, so the pot stays flagged dirty (you must
+            # clean it, i.e. dump and rebrew).
             if self._cleaned_since_last_brew():
                 self.ready_time = t
                 event = "ready"
@@ -151,6 +165,13 @@ class Brains:
         if self.state != s:
             self.state = s
             self.timestamp = t
+
+    def _reached_target(self, net):
+        # A completed brew must reach the target level (within margin).  No
+        # target set -> accept any settled brew (check disabled).
+        if self._target_g is None:
+            return True
+        return net >= self._target_g - self.BREW_TARGET_MARGIN_G
 
     def _cleaned_since_last_brew(self):
         # True if there's no batch yet, or the pot was cleaned after the last

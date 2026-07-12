@@ -199,6 +199,53 @@ class TestBrains(unittest.TestCase):
         self.assertEqual(b.ready_time, rt1)  # NOT reset -> stays dirty
         self.assertTrue(b.is_dirty(self.STALE))
 
+    def test_dribble_below_target_not_ready(self):
+        # a small gradual addition that settles well below target must NOT be
+        # declared a completed brew (no ready, no event)
+        b, clk = make()
+        net = 0
+        for _ in range(20):  # rises to ~200 g, then settle
+            net += 10
+            clk.advance(0.5)
+            event = b.store(net, target_g=1250)
+        for _ in range(int(brains.Brains.RATE_WINDOW_S / 0.5) + 3):
+            clk.advance(0.5)
+            e = b.store(net, target_g=1250)
+            event = e or event
+        self.assertNotEqual(b.state, "ready")
+        self.assertIsNone(b.ready_time)
+
+    def test_full_brew_reaches_target_is_ready(self):
+        b, clk = make()
+        net = 0
+        while net < 1200:  # gradual fill past target-margin (1250-150=1100)
+            net += 10
+            clk.advance(0.5)
+            b.store(net, target_g=1250)
+        event = None
+        for _ in range(int(brains.Brains.RATE_WINDOW_S / 0.5) + 3):
+            clk.advance(0.5)
+            e = b.store(net, target_g=1250)
+            event = e or event
+        self.assertEqual(b.state, "ready")
+        self.assertEqual(event, "ready")
+
+    def test_half_pot_target_accepts_half(self):
+        # with a half-pot target, ~625 g counts as a completed brew
+        b, clk = make()
+        net = 0
+        while net < 650:
+            net += 10
+            clk.advance(0.5)
+            b.store(net, target_g=625)
+        event = None
+        for _ in range(int(brains.Brains.RATE_WINDOW_S / 0.5) + 3):
+            clk.advance(0.5)
+            e = b.store(net, target_g=625)
+            event = e or event
+        self.assertEqual(b.state, "ready")
+        self.assertEqual(event, "ready")
+
     def test_clean_clears_dirty(self):
         b, clk = make()
         net = self._brew_to_full(b, clk)
