@@ -30,8 +30,8 @@ CONFIG = {
 STALE_S = CONFIG["stale_hours"] * 3600.0
 
 
-def derive(raw_g, brew_state="ready", elapsed=0, valid=True):
-    return potstate.derive(raw_g, valid, brew_state, elapsed, CONFIG)
+def derive(raw_g, brew_state="ready", elapsed=0, valid=True, dirty=False):
+    return potstate.derive(raw_g, valid, brew_state, elapsed, CONFIG, dirty=dirty)
 
 
 class TestNetContents(unittest.TestCase):
@@ -100,21 +100,33 @@ class TestDerive(unittest.TestCase):
         self.assertEqual(s.key, "aging")
         self.assertFalse(s.expired)
 
-    def test_stale_latches_expired(self):
-        # past the stale window -> expired flag set (biohazard)
-        s = derive(795 + 600, brew_state="ready", elapsed=STALE_S + 10)
+    def test_dirty_shows_stale_biohazard(self):
+        # biohazard is driven by the dirty flag (from Brains), not elapsed
+        s = derive(795 + 600, brew_state="ready", elapsed=STALE_S + 10, dirty=True)
         self.assertEqual(s.key, "stale")
         self.assertTrue(s.expired)
         self.assertIn("dump", s.text.lower())
+
+    def test_not_dirty_stays_aging_even_when_old(self):
+        # without the dirty flag, an old ready pot is at most "aging", never
+        # the stale/biohazard state (dirtiness is Brains' call, not elapsed's)
+        s = derive(795 + 600, brew_state="ready", elapsed=STALE_S + 10, dirty=False)
+        self.assertNotEqual(s.key, "stale")
+        self.assertFalse(s.expired)
+
+    def test_dirty_empty_pot_still_biohazard(self):
+        # a dumped-but-unwashed pot (empty, but dirty) still shows the hazard
+        s = derive(795, brew_state="empty", elapsed=STALE_S, dirty=True)
+        self.assertTrue(s.expired)
 
     def test_fill_clamped(self):
         # overfull reading clamps to 1.0
         s = derive(795 + 2000, brew_state="ready", elapsed=10)
         self.assertEqual(s.fill, 1.0)
 
-    def test_empty_pot_never_expired(self):
-        # an empty pot, even long after ready, is just "empty" (no nag)
-        s = derive(795, brew_state="ready", elapsed=STALE_S * 5)
+    def test_clean_empty_pot_not_expired(self):
+        # an empty, NOT-dirty pot is just "empty" (no nag)
+        s = derive(795, brew_state="empty", elapsed=STALE_S * 5, dirty=False)
         self.assertEqual(s.key, "empty")
         self.assertFalse(s.expired)
 
