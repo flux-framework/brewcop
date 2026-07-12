@@ -74,6 +74,7 @@ import machineconfig
 import usersettings
 import potstate
 import brewsource
+import brewstate
 from scale import open_scale, NoScale, POT_TOLERANCE_G
 from backlight import Backlight
 
@@ -1013,7 +1014,10 @@ class BrewcopApp(App):
                     "scale: {} (running without hardware)".format(err), file=sys.stderr
                 )
             self.source = brewsource.ScaleBrewSource(
-                self.scale, self.settings, tick_period=TICK_PERIOD
+                self.scale,
+                self.settings,
+                tick_period=TICK_PERIOD,
+                persist=brewstate,  # brew age survives reboots
             )
 
         # Backlight (safe no-op if the sysfs node is absent/unwritable).
