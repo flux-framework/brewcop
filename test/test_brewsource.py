@@ -103,18 +103,19 @@ class TestScaleBrewSource(unittest.TestCase):
         r = src.poll()
         self.assertFalse(r.moving)
 
-    def test_brew_then_ready_surfaces_event(self):
-        # rising weight (brewing) then steady (ready) -> event "ready"
-        rising = [(795 + 100 * i, True) for i in range(1, 5)]  # brewing
-        steady = [(795 + 900, True)] * 70  # drain window
-        sc = ScriptedScale(rising + steady)
+    def test_placing_full_pot_emits_no_ready(self):
+        # Setting a full pot on the scale (a step jump) must NOT fire a
+        # "ready" event -- only a gradual on-scale brew does.  This is the
+        # notification-storm fix at the source layer.  (Brew *timing* is
+        # rate-based and covered with an injectable clock in test_brains;
+        # ScriptedScale here polls with no time delay, so every change reads
+        # as an instantaneous step -- exactly the placement case.)
+        sc = ScriptedScale([(795 + 900, True)] * 10)
         src = brewsource.ScaleBrewSource(sc, SETTINGS)
-        seen_ready = False
-        for _ in range(len(rising) + len(steady)):
-            r = src.poll()
-            if r.event == "ready":
-                seen_ready = True
-        self.assertTrue(seen_ready)
+        events = [src.poll().event for _ in range(10)]
+        self.assertTrue(all(e is None for e in events))
+        # ...and it still settles to a coffee state, not brewing
+        self.assertIn(src.poll().pot_state.key, ("fresh", "aging"))
 
 
 class TestMockBrewSource(unittest.TestCase):
