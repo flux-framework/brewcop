@@ -414,6 +414,7 @@ class Header(BoxLayout):
 STATE_COLOR = {
     "no_pot": MUTED,
     "empty": MUTED,
+    "present": INK,  # coffee present, age unknown
     "fresh": GREEN,
     "aging": AMBER,
     "brewing": ACCENT,
@@ -426,6 +427,7 @@ def mock_states():
     return [
         potstate.PotState("no_pot", "No pot on scale", 0.0, False),
         potstate.PotState("empty", "Empty pot", 0.02, False),
+        potstate.PotState("present", "Coffee: ~0.94 L - age unknown", 0.75, False),
         potstate.PotState("fresh", "Coffee: ~0.94 L - fresh (12 min)", 0.75, False),
         potstate.PotState("brewing", "Brewing - 3 min", 0.40, False),
         potstate.PotState("aging", "Coffee: ~0.70 L - aging (2h 10m)", 0.56, False),
