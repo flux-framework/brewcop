@@ -80,7 +80,28 @@ class TestScaleBrewSource(unittest.TestCase):
         src = brewsource.ScaleBrewSource(FailingScale(), SETTINGS)
         r = src.poll()  # must not raise
         self.assertFalse(r.valid)
-        self.assertEqual(r.pot_state.key, "no_pot")
+        self.assertTrue(r.moving)  # invalid read reported as "moving"
+        self.assertEqual(r.pot_state.key, "no_pot")  # held initial state
+
+    def test_invalid_holds_last_valid_state(self):
+        # A valid full-pot read, then an invalid (moving) read: the moving
+        # read must keep showing the last good state, not blank to no_pot.
+        sc = ScriptedScale([(795 + 900, True), (0.0, False)])
+        src = brewsource.ScaleBrewSource(sc, SETTINGS)
+        good = src.poll()
+        self.assertTrue(good.valid)
+        self.assertIn(good.pot_state.key, ("fresh", "aging"))
+        moving = src.poll()
+        self.assertFalse(moving.valid)
+        self.assertTrue(moving.moving)
+        # same held state, not "no_pot"/"unavailable"
+        self.assertEqual(moving.pot_state.key, good.pot_state.key)
+
+    def test_valid_read_clears_moving(self):
+        sc = ScriptedScale([(795 + 900, True)])
+        src = brewsource.ScaleBrewSource(sc, SETTINGS)
+        r = src.poll()
+        self.assertFalse(r.moving)
 
     def test_brew_then_ready_surfaces_event(self):
         # rising weight (brewing) then steady (ready) -> event "ready"

@@ -31,11 +31,14 @@ from brains import Brains
 class PollResult:
     """What a source returns each tick."""
 
-    def __init__(self, pot_state, event=None, raw_grams=None, valid=False):
+    def __init__(
+        self, pot_state, event=None, raw_grams=None, valid=False, moving=False
+    ):
         self.pot_state = pot_state  # potstate.PotState
         self.event = event  # "ready" or None
         self.raw_grams = raw_grams  # last raw scale reading (g) or None
         self.valid = valid  # was the last weight valid
+        self.moving = moving  # scale in motion / reading not yet stable
 
 
 class ScaleBrewSource:
@@ -55,6 +58,10 @@ class ScaleBrewSource:
             tick_period=tick_period,
             empty_thresh=settings["empty_thresh_g"],
         )
+        # Last valid PotState, held through brief invalid/moving readings so
+        # the display doesn't flap to "unavailable" every time the scale is
+        # in motion (a bump, a pour).
+        self._last_pot = potstate.PotState("no_pot", "No pot on scale", 0.0, False)
 
     def poll(self):
         # Read the scale (never let a serial hiccup crash the caller).
@@ -64,29 +71,31 @@ class ScaleBrewSource:
         except Exception:
             valid = False
 
-        raw = self._scale.weight if valid else None
+        if not valid:
+            # Scale is moving / reading not yet stable.  Keep showing the last
+            # good state rather than blanking, and flag that we're moving so
+            # the UI can show a subtle "settling" indicator.
+            return PollResult(
+                self._last_pot, event=None, raw_grams=None, valid=False, moving=True
+            )
 
-        event = None
-        brew_state = self._brains.state
-        elapsed = self._brains.elapsed()
+        raw = self._scale.weight
 
-        if valid:
-            # Feed Brains the *contents* weight (net of tare, tolerance
-            # applied), matching how the original code stored w = weight -
-            # tare.  Brains only cares about relative change + empty thresh.
-            net = potstate.net_contents_g(raw, self._settings["pot_tare_g"])
-            event = self._brains.store(net)
-            brew_state = self._brains.state
-            elapsed = self._brains.elapsed()
+        # Feed Brains the *contents* weight (net of tare, tolerance applied),
+        # matching how the original code stored w = weight - tare.  Brains
+        # only cares about relative change + empty thresh.
+        net = potstate.net_contents_g(raw, self._settings["pot_tare_g"])
+        event = self._brains.store(net)
 
         pot = potstate.derive(
-            raw_weight_g=raw if raw is not None else 0.0,
-            weight_is_valid=valid,
-            brew_state=brew_state,
-            elapsed_s=elapsed,
+            raw_weight_g=raw,
+            weight_is_valid=True,
+            brew_state=self._brains.state,
+            elapsed_s=self._brains.elapsed(),
             config=self._settings,
         )
-        return PollResult(pot, event=event, raw_grams=raw, valid=valid)
+        self._last_pot = pot
+        return PollResult(pot, event=event, raw_grams=raw, valid=True, moving=False)
 
 
 class MockBrewSource:
