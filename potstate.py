@@ -138,13 +138,21 @@ def derive(raw_weight_g, weight_is_valid, brew_state, elapsed_s, config):
     if brew_state == "brewing":
         return PotState("brewing", "Brewing - {}".format(elapsed_txt), fill, False)
 
-    # ready (or unknown-but-has-coffee): fresh -> aging -> stale by elapsed.
-    if brew_state == "ready" and elapsed_s >= stale_s:
+    # Coffee present but never observed brewing (cold start, or non-coffee
+    # weight): age is unknown.  Show the level but claim no freshness -- no
+    # timer, no staleness/biohazard.  "fresh"/"stale" require a known age.
+    if brew_state != "ready":
+        return PotState(
+            "present", "Coffee: ~{:.2f} L - age unknown".format(litres), fill, False
+        )
+
+    # ready: fresh -> aging -> stale by the (known) elapsed age.
+    if elapsed_s >= stale_s:
         return PotState(
             "stale", "Stale coffee - please dump ({})".format(elapsed_txt), fill, True
         )
 
-    if brew_state == "ready" and elapsed_s >= stale_s * AGING_FRACTION:
+    if elapsed_s >= stale_s * AGING_FRACTION:
         return PotState(
             "aging",
             "Coffee: ~{:.2f} L - aging ({})".format(litres, elapsed_txt),
@@ -152,7 +160,6 @@ def derive(raw_weight_g, weight_is_valid, brew_state, elapsed_s, config):
             False,
         )
 
-    # fresh (or we simply see coffee and no timing yet)
     return PotState(
         "fresh",
         "Coffee: ~{:.2f} L - fresh ({})".format(litres, elapsed_txt),

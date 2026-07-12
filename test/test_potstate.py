@@ -73,6 +73,22 @@ class TestDerive(unittest.TestCase):
         self.assertAlmostEqual(s.fill, 900 / 1250, places=3)
         self.assertIn("L", s.text)
 
+    def test_present_age_unknown(self):
+        # coffee on the scale but brains never saw it brew -> "present":
+        # level shown, no freshness claim, not expired
+        s = derive(795 + 800, brew_state="present", elapsed=0)
+        self.assertEqual(s.key, "present")
+        self.assertFalse(s.expired)
+        self.assertIn("age unknown", s.text.lower())
+        self.assertGreater(s.fill, 0)
+
+    def test_present_never_goes_stale(self):
+        # even with a huge elapsed, "present" must not become stale/expired
+        # (staleness requires a known ready age)
+        s = derive(795 + 600, brew_state="present", elapsed=STALE_S * 10)
+        self.assertEqual(s.key, "present")
+        self.assertFalse(s.expired)
+
     def test_brewing(self):
         s = derive(795 + 400, brew_state="brewing", elapsed=30)
         self.assertEqual(s.key, "brewing")
