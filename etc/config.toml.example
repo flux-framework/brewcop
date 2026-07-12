@@ -17,10 +17,10 @@
 #   "/dev/ttyUSB0"               -> simple but can change across reboots
 serial_port = "auto"
 
-# Slack "coffee is ready" notifications.
-#   Keep DISABLED until the brew-detection logic is validated against real
-#   data -- historically it stormed the channel on every pour.
-slack_enabled = false
+# Slack webhook URL for "coffee is ready" notifications (a secret): this is
+# only WHERE messages go. WHETHER to send them is the runtime "Slack
+# announcements" toggle on the Settings screen (a user setting), which stays
+# off until the brew-detection logic is validated against real data.
 slack_webhook_url = ""
 
 # Deployment location, used in the notification messages

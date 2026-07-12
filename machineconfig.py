@@ -40,9 +40,9 @@ DEFAULT_PATH = "/etc/brewcop/config.toml"
 DEFAULTS = {
     # Serial device for the scale. "auto" -> autodetect a USB adapter.
     "serial_port": "auto",
-    # Slack notification (OFF by default -- do not surprise anyone until the
-    # brew-detection logic is validated against real data).
-    "slack_enabled": False,
+    # Slack webhook URL (a secret): WHERE ready-pot messages are sent.
+    # WHETHER to send them is a runtime user setting (slack_enabled), not
+    # here -- this file is install-time facts only.
     "slack_webhook_url": "",
     # Deployment location, woven into the "coffee is ready" messages.
     "location": "B451",
@@ -64,10 +64,6 @@ class MachineConfig:
     @property
     def serial_port(self):
         return self._values["serial_port"]
-
-    @property
-    def slack_enabled(self):
-        return bool(self._values["slack_enabled"])
 
     @property
     def slack_webhook_url(self):
