@@ -11,11 +11,11 @@
 #############################################################
 
 """
-Characterization tests for brains.Brains.
+Tests for brains.Brains: the rate-based brew detector.
 
-These pin the CURRENT (deliberately-preserved, over-eager) behavior so a
-future redesign is a conscious change, not an accident.  Where a test
-documents a known-bad quirk, it says so.
+Weight is fed as CONTENTS grams (net of pot tare); the scale/brewsource
+layer handles tare and reports a large-negative net when the pot is absent.
+Each test drives an injectable clock so rates are deterministic.
 """
 
 import os
@@ -40,8 +40,14 @@ class FakeClock:
 
 def make(empty_thresh=50):
     clk = FakeClock()
-    b = brains.Brains(tick_period=1, empty_thresh=empty_thresh, now=clk)
+    b = brains.Brains(empty_thresh=empty_thresh, now=clk)
     return b, clk
+
+
+def feed(b, clk, net, dt=0.5):
+    """Advance the clock by dt and store one sample; return the event."""
+    clk.advance(dt)
+    return b.store(net)
 
 
 class TestBrains(unittest.TestCase):
@@ -49,67 +55,99 @@ class TestBrains(unittest.TestCase):
         b, _ = make()
         self.assertEqual(b.state, "unknown")
 
-    def test_rising_weight_is_brewing(self):
-        b, _ = make()
-        for w in (100, 200, 300):
-            b.store(w)
-        self.assertEqual(b.state, "brewing")
-
-    def test_stable_full_pot_is_ready(self):
-        # steady, above empty threshold, no rise -> ready
-        b, _ = make()
+    def test_empty_pot(self):
+        b, clk = make(empty_thresh=50)
         for _ in range(5):
-            b.store(1000)
-        self.assertEqual(b.state, "ready")
-
-    def test_low_stable_is_empty(self):
-        b, _ = make(empty_thresh=50)
-        for _ in range(5):
-            b.store(10)
+            feed(b, clk, 10)
         self.assertEqual(b.state, "empty")
 
-    def test_brewing_to_ready_emits_event(self):
-        b, _ = make()
-        # rise -> brewing
-        b.store(100)
-        b.store(500)
+    def test_absent_pot_reads_empty(self):
+        # pot off the scale -> net is very negative -> "empty"
+        b, clk = make()
+        for _ in range(5):
+            feed(b, clk, -800)
+        self.assertEqual(b.state, "empty")
+
+    def _brew_to_full(self, b, clk, target=900, step=10):
+        # Gradual fill: step g per 0.5 s tick = 2*step g/s, within brew rate.
+        # Climbs past the empty threshold up to a realistic level.
+        net = 0
+        while net < target:
+            net += step
+            feed(b, clk, net)
+        return net
+
+    def test_gradual_fill_is_brewing(self):
+        b, clk = make()
+        self._brew_to_full(b, clk)
         self.assertEqual(b.state, "brewing")
-        # now feed steady (non-increasing) values until it flips to ready.
-        # The window must drain of any increasing pair first.
+
+    def test_brew_then_settle_emits_ready_and_sets_age(self):
+        b, clk = make()
+        net = self._brew_to_full(b, clk)
+        self.assertEqual(b.state, "brewing")
+        # stop rising: hold steady -> settles to ready, emits event
         event = None
-        for _ in range(b.history.maxlen + 1):
-            e = b.store(500)
+        for _ in range(int(brains.Brains.RATE_WINDOW_S / 0.5) + 2):
+            e = feed(b, clk, net)
             if e:
                 event = e
         self.assertEqual(b.state, "ready")
         self.assertEqual(event, "ready")
+        # age starts near zero right after ready
+        self.assertLess(b.elapsed(), 5)
 
-    def test_elapsed_tracks_state_entry(self):
+    def test_step_placement_is_not_brewing(self):
+        # a full pot set down in one step (hundreds of g in 0.5 s) -> ready,
+        # never brewing, no "ready" event (it wasn't brewed here)
         b, clk = make()
+        feed(b, clk, 0)
+        event = feed(b, clk, 900)  # +900 g in one tick = 1800 g/s
+        self.assertEqual(b.state, "ready")
+        self.assertIsNone(event)
+
+    def test_age_ticks_while_pot_absent(self):
+        # brew -> ready, then remove the pot; age must keep advancing so the
+        # pot reads its true age when it returns
+        b, clk = make()
+        net = self._brew_to_full(b, clk)
+        for _ in range(12):
+            feed(b, clk, net)  # settle -> ready
+        self.assertEqual(b.state, "ready")
+        ready_time = b.ready_time
+        # pot leaves for 30 minutes
         for _ in range(5):
-            b.store(1000)  # ready
-        clk.advance(42)
-        self.assertAlmostEqual(b.elapsed(), 42)
+            feed(b, clk, -800, dt=360)  # big time jumps, pot absent
+        self.assertEqual(b.state, "empty")
+        # pot returns (step) at a lower weight (some was poured)
+        feed(b, clk, 600)
+        self.assertEqual(b.state, "ready")
+        # SAME ready_time preserved -> age reflects the ~30 min absence
+        self.assertEqual(b.ready_time, ready_time)
+        self.assertGreater(b.elapsed(), 30 * 60)
 
-    def test_no_slack_side_effect(self):
-        # store() must never reach the network; it only returns an event.
-        b, _ = make()
-        # (no SLACK_WEBHOOK_URL set, no requests import used) -- if store()
-        # tried to POST, this would raise. It must not.
-        b.store(100)
-        b.store(200)
-        for _ in range(b.history.maxlen + 1):
-            b.store(200)
-        self.assertIn(b.state, ("ready", "brewing"))
+    def test_return_does_not_emit_ready(self):
+        # returning the pot must NOT fire a notification (only a real brew does)
+        b, clk = make()
+        # establish a ready pot via a brew
+        net = self._brew_to_full(b, clk)
+        for _ in range(12):
+            feed(b, clk, net)
+        # remove and return
+        for _ in range(3):
+            feed(b, clk, -800, dt=120)
+        event = feed(b, clk, 700)  # step return
+        self.assertIsNone(event)
 
-    # --- documents the KNOWN over-eager quirk (do not "fix" silently) ---
-    def test_KNOWN_QUIRK_single_blip_trips_brewing(self):
-        # A lone 1 g uptick anywhere in the window reads as "brewing".
-        # This is the root of the notification storm; pinned intentionally.
-        b, _ = make()
-        b.store(1000)
-        b.store(1001)  # +1 g blip
-        self.assertEqual(b.state, "brewing")
+    def test_startup_with_coffee_assumes_fresh(self):
+        # a pot with coffee already present at first sight -> ready, age ~0,
+        # no event
+        b, clk = make()
+        event = feed(b, clk, 800)
+        self.assertEqual(b.state, "ready")
+        self.assertIsNone(event)
+        self.assertIsNotNone(b.ready_time)
+        self.assertLess(b.elapsed(), 5)
 
 
 if __name__ == "__main__":
