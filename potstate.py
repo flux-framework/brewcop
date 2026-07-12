@@ -38,11 +38,6 @@ from scale import POT_TOLERANCE_G
 # biohazard, which is driven by the stale timeout.
 AGING_FRACTION = 0.5
 
-# Raw weight (grams) at or below which the platter is considered empty
-# (nothing on it).  Above this but below the pot tare -> "under_tare": a
-# weight is present but is not a pot.
-EMPTY_PLATTER_G = 10
-
 
 class PotState:
     """Plain result record (no UI types)."""
@@ -125,14 +120,10 @@ def derive(raw_weight_g, weight_is_valid, brew_state, elapsed_s, config):
 
     net = net_contents_g(raw_weight_g, tare)
 
-    # Below the pot tare: not (yet) a pot.  Distinguish a truly empty platter
-    # from something sitting on it that is lighter than the tare -- the latter
-    # shows its raw weight (no carafe drawn), which is also handy for checking
-    # the configured tare against the actual empty carafe.
+    # Below the pot tare: not a pot.  (The Home screen always shows the raw
+    # weight separately, so a light object's grams are still visible.)
     if net < 0:
-        if raw_weight_g <= EMPTY_PLATTER_G:
-            return PotState("no_pot", "No pot on scale", 0.0, False)
-        return PotState("under_tare", "{:.0f} g".format(raw_weight_g), 0.0, False)
+        return PotState("no_pot", "No pot on scale", 0.0, False)
 
     fill = max(0.0, min(1.0, net / capacity)) if capacity > 0 else 0.0
     litres = net / 1000.0

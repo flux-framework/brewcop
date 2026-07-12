@@ -48,20 +48,12 @@ class TestNetContents(unittest.TestCase):
 
 
 class TestDerive(unittest.TestCase):
-    def test_no_pot_when_platter_empty(self):
-        # nothing (or near-nothing) on the platter
+    def test_no_pot_below_tare(self):
+        # anything below the pot tare is "no pot" (the Home screen shows the
+        # raw weight separately, so a light object's grams are still visible)
         self.assertEqual(derive(0).key, "no_pot")
-        self.assertEqual(derive(5).key, "no_pot")
-
-    def test_under_tare_shows_weight(self):
-        # something present but lighter than the pot tare -> under_tare,
-        # status line is just the raw grams (no carafe drawn, fill 0)
-        s = derive(700)
-        self.assertEqual(s.key, "under_tare")
-        self.assertEqual(s.fill, 0.0)
-        self.assertEqual(s.text, "700 g")
-        # a light object just above the empty-platter cutoff also counts
-        self.assertEqual(derive(320).key, "under_tare")
+        self.assertEqual(derive(320).key, "no_pot")
+        self.assertEqual(derive(700).key, "no_pot")
 
     def test_invalid_weight(self):
         s = derive(1500, valid=False)
