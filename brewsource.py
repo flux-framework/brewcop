@@ -98,15 +98,22 @@ class ScaleBrewSource:
         event = self._brains.store(net)
         self._maybe_persist()
 
+        stale_s = float(self._settings["stale_hours"]) * 3600.0
         pot = potstate.derive(
             raw_weight_g=raw,
             weight_is_valid=True,
             brew_state=self._brains.state,
             elapsed_s=self._brains.elapsed(),
             config=self._settings,
+            dirty=self._brains.is_dirty(stale_s),
         )
         self._last_pot = pot
         return PollResult(pot, event=event, raw_grams=raw, valid=True, moving=False)
+
+    def clean(self):
+        """Record a pot cleaning (CLEAN button); persist the change."""
+        self._brains.clean()
+        self._maybe_persist()
 
     def _maybe_persist(self):
         # Save only when the durable brew state actually changed, so writes
