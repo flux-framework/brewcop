@@ -1,0 +1,28 @@
+# brewcop machine / deployment config -- EXAMPLE
+#
+# Copy to /etc/brewcop/config.toml and fill in for this unit:
+#   sudo install -m 0600 etc/config.toml.example /etc/brewcop/config.toml
+#   sudo $EDITOR /etc/brewcop/config.toml
+#
+# This file holds install-time facts (and a secret webhook), read once at
+# startup and never written at runtime -- so it is fine on the read-only
+# root. It is DISTINCT from the touchscreen-editable user settings
+# (stale timeout, pot tare/capacity, ...), which live in a writable JSON.
+#
+# Do NOT commit the real /etc/brewcop/config.toml -- it contains the secret.
+
+# Serial device for the Avery Berkel scale.
+#   "auto"                       -> autodetect (/dev/serial/by-id, /dev/ttyUSB*)
+#   "/dev/serial/by-id/usb-..."  -> stable path (preferred for a fixed unit)
+#   "/dev/ttyUSB0"               -> simple but can change across reboots
+serial_port = "auto"
+
+# Slack "coffee is ready" notifications.
+#   Keep DISABLED until the brew-detection logic is validated against real
+#   data -- historically it stormed the channel on every pour.
+slack_enabled = false
+slack_webhook_url = ""
+
+# Deployment location, used in the notification messages
+# (e.g. "... coffee is ready in B451.").
+location = "B451"
