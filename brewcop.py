@@ -441,7 +441,6 @@ class HomeScreen(Screen):
         super().__init__(**kwargs)
         self.go = go
         self.app = app  # for source.poll(), notify(), settings
-        self._latched_expired = False  # stale hazard stays until acknowledged
         self._last_key = None  # for wake-on-event edge detection
         self._flashing = False  # suppress status updates while flashing a msg
         root = BoxLayout(orientation="vertical", padding=dp(24), spacing=dp(16))
@@ -567,7 +566,7 @@ class HomeScreen(Screen):
         self.tick()
 
     def tick(self, *_a):
-        """Poll the source, latch a stale hazard, render, fire events."""
+        """Poll the source, render, fire events."""
         # Don't poll the shared serial port while another screen (Weigh) is
         # polling it directly -- two readers would corrupt each other's ECR
         # responses.  Home only ticks while it is the visible screen.
@@ -576,11 +575,9 @@ class HomeScreen(Screen):
         result = self.app.source.poll()
         pot = result.pot_state
 
-        # Latch the stale hazard: once stale, keep showing it until the user
-        # presses MARK CLEANED -- a weight rise (top-up) must not clear it.
-        if pot.expired:
-            self._latched_expired = True
-
+        # Dirtiness (the biohazard) is now decided by Brains and carried on
+        # the PotState (expired) -- it already survives dumping/rebrew and
+        # reboots, so no UI-side latch is needed.
         self._pot = pot
         self._render(pot)
         # Live weight readout beside the status line: "settling" while moving,
@@ -601,32 +598,27 @@ class HomeScreen(Screen):
         self._last_key = pot.key
 
     def _cycle(self):
-        # --mock only: advance canned states.  Also clears any latch, so the
-        # stale->(cycle) path behaves.
-        self._latched_expired = False
+        # --mock only: advance canned states.
         self.app.source.advance()
         self.tick()
 
     def _action(self):
-        # Stale -> acknowledge cleaning; otherwise open the bean scale.
-        if self._showing_stale():
+        # While the biohazard is showing, the button is CLEAN; otherwise it
+        # opens the bean scale.
+        if self._pot.expired:
             self._mark_cleaned()
         else:
             self.go("weigh")
 
     def _mark_cleaned(self):
-        # CLEAN means "the stale pot has been emptied".  Only honor it once
-        # the pot is actually empty/absent -- otherwise the nag would clear
-        # while old coffee is still sitting there (and would just re-latch on
-        # the next tick anyway).  If coffee remains, refuse and hint.
+        # CLEAN records that the pot was washed.  You can't wash a full pot,
+        # so require it be empty/absent first; otherwise hint.
         if self.app.mock:
-            # No real scale in mock: just advance to the canned "empty" state.
-            self._latched_expired = False
             self.app.source.advance()
             self.tick()
             return
         if self._pot.key in ("empty", "no_pot"):
-            self._latched_expired = False
+            self.app.source.clean()
             self.tick()
         else:
             self._flash("Empty the pot first")
@@ -644,11 +636,8 @@ class HomeScreen(Screen):
 
         Clock.schedule_once(_end, seconds)
 
-    def _showing_stale(self):
-        return self._latched_expired or self._pot.expired
-
     def _render(self, pot):
-        expired = self._showing_stale()
+        expired = pot.expired  # dirtiness decided by Brains, carried here
         color = STATE_COLOR.get(pot.key, INK)
         # While a transient message is flashing, leave the status line alone
         # (the carafe/button/weight still update normally).
@@ -666,7 +655,7 @@ class HomeScreen(Screen):
             coffee = AMBER if pot.key == "aging" else GREEN
             self.carafe.set_state(pot.fill, coffee, expired)
 
-        # Bottom button: MARK CLEANED while stale, else WEIGH BEANS.
+        # Bottom button: CLEAN while the biohazard shows, else WEIGH BEANS.
         if expired:
             self.action.text = "MARK CLEANED"
             self.action._bg_rgba = HAZARD
