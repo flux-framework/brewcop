@@ -443,6 +443,7 @@ class HomeScreen(Screen):
         self.app = app  # for source.poll(), notify(), settings
         self._latched_expired = False  # stale hazard stays until acknowledged
         self._last_key = None  # for wake-on-event edge detection
+        self._flashing = False  # suppress status updates while flashing a msg
         root = BoxLayout(orientation="vertical", padding=dp(24), spacing=dp(16))
 
         # top bar: title centered across the FULL width (badge + settings
@@ -614,12 +615,34 @@ class HomeScreen(Screen):
             self.go("weigh")
 
     def _mark_cleaned(self):
-        # Human confirmed the pot was dealt with: drop the latch.  Next tick
-        # reflects the real scale state (or, in mock, the current state).
-        self._latched_expired = False
+        # CLEAN means "the stale pot has been emptied".  Only honor it once
+        # the pot is actually empty/absent -- otherwise the nag would clear
+        # while old coffee is still sitting there (and would just re-latch on
+        # the next tick anyway).  If coffee remains, refuse and hint.
         if self.app.mock:
+            # No real scale in mock: just advance to the canned "empty" state.
+            self._latched_expired = False
             self.app.source.advance()
-        self.tick()
+            self.tick()
+            return
+        if self._pot.key in ("empty", "no_pot"):
+            self._latched_expired = False
+            self.tick()
+        else:
+            self._flash("Empty the pot first")
+
+    def _flash(self, msg, seconds=2.0):
+        # Briefly show a message on the status line, holding it against the
+        # periodic tick, then resume normal status.
+        self._flashing = True
+        self.status.text = msg
+        self.status.color = HAZARD
+
+        def _end(*_a):
+            self._flashing = False
+            self.tick()
+
+        Clock.schedule_once(_end, seconds)
 
     def _showing_stale(self):
         return self._latched_expired or self._pot.expired
@@ -627,8 +650,11 @@ class HomeScreen(Screen):
     def _render(self, pot):
         expired = self._showing_stale()
         color = STATE_COLOR.get(pot.key, INK)
-        self.status.text = pot.text
-        self.status.color = color
+        # While a transient message is flashing, leave the status line alone
+        # (the carafe/button/weight still update normally).
+        if not self._flashing:
+            self.status.text = pot.text
+            self.status.color = color
 
         if pot.key == "no_pot":
             # Nothing counted as a pot: blank centerpiece, no ghost carafe.
