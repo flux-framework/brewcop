@@ -413,7 +413,6 @@ class Header(BoxLayout):
 # Per-state text color for the Home status line, keyed by PotState.key.
 STATE_COLOR = {
     "no_pot": MUTED,
-    "under_tare": MUTED,
     "empty": MUTED,
     "fresh": GREEN,
     "aging": AMBER,
@@ -426,7 +425,6 @@ STATE_COLOR = {
 def mock_states():
     return [
         potstate.PotState("no_pot", "No pot on scale", 0.0, False),
-        potstate.PotState("under_tare", "320 g", 0.0, False),
         potstate.PotState("empty", "Empty pot", 0.02, False),
         potstate.PotState("fresh", "Coffee: ~0.94 L - fresh (12 min)", 0.75, False),
         potstate.PotState("brewing", "Brewing - 3 min", 0.40, False),
@@ -482,22 +480,6 @@ class HomeScreen(Screen):
         )
         gear.bind(on_release=lambda *_a: go("settings"))
         top.add_widget(gear)
-
-        # Small "settling" indicator, shown only while the scale is in motion
-        # (a bump / pour).  Sits under the left badge; hidden when stable.
-        self.moving_dot = Label(
-            text="● settling",
-            color=AMBER,
-            font_size=sp(12),
-            halign="left",
-            valign="middle",
-            size_hint=(None, None),
-            size=(dp(120), dp(20)),
-            pos_hint={"x": 0, "y": 0},
-            opacity=0,
-        )
-        self.moving_dot.bind(size=lambda w, s: setattr(w, "text_size", s))
-        top.add_widget(self.moving_dot)
         root.add_widget(top)
 
         # carafe centerpiece (tap anywhere on it to cycle faked states)
@@ -517,11 +499,34 @@ class HomeScreen(Screen):
         center.add_widget(self.carafe)
         root.add_widget(center)
 
-        # persistent pot-status line
+        # Status row: pot-status centered across the full width, with a live
+        # raw-weight readout floated to the right (swaps to "settling" while
+        # the scale is in motion).
+        statusbar = FloatLayout(size_hint_y=None, height=dp(40))
         self.status = Label(
-            text="", font_size=sp(20), bold=True, size_hint_y=None, height=dp(40)
+            text="",
+            font_size=sp(20),
+            bold=True,
+            halign="center",
+            valign="middle",
+            size_hint=(1, 1),
+            pos_hint={"x": 0, "y": 0},
         )
-        root.add_widget(self.status)
+        self.status.bind(size=lambda w, s: setattr(w, "text_size", s))
+        statusbar.add_widget(self.status)
+        self.weight_lbl = Label(
+            text="",
+            color=MUTED,
+            font_size=sp(16),
+            halign="right",
+            valign="middle",
+            size_hint=(None, 1),
+            width=dp(110),
+            pos_hint={"right": 1, "y": 0},
+        )
+        self.weight_lbl.bind(size=lambda w, s: setattr(w, "text_size", s))
+        statusbar.add_widget(self.weight_lbl)
+        root.add_widget(statusbar)
 
         # In --mock mode only, a strip to advance the canned states.
         if self.app.mock:
@@ -574,7 +579,14 @@ class HomeScreen(Screen):
 
         self._pot = pot
         self._render(pot)
-        self.moving_dot.opacity = 1 if result.moving else 0
+        # Live weight readout beside the status line: "settling" while moving,
+        # else the raw grams (blank if we've no reading yet).
+        if result.moving:
+            self.weight_lbl.text = "settling"
+        elif result.raw_grams is not None:
+            self.weight_lbl.text = "{:.0f} g".format(result.raw_grams)
+        else:
+            self.weight_lbl.text = ""
 
         # Notify + wake on the brewing->ready transition (app gates Slack).
         if result.event == "ready":
@@ -615,9 +627,9 @@ class HomeScreen(Screen):
         self.status.text = pot.text
         self.status.color = color
 
-        if pot.key in ("no_pot", "under_tare"):
+        if pot.key == "no_pot":
             # Nothing counted as a pot: blank centerpiece, no ghost carafe.
-            # (under_tare still shows its raw grams in the status line above.)
+            # (The weight readout still shows the raw grams, if any.)
             self.carafe.set_state(0.0, GREEN, False)
             self.carafe.opacity = 0.0
         else:
