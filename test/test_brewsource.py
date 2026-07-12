@@ -66,14 +66,17 @@ class TestScaleBrewSource(unittest.TestCase):
         self.assertEqual(r.pot_state.key, "no_pot")
         self.assertTrue(r.valid)
 
-    def test_full_pot_reads_fresh(self):
-        # a steady full pot -> Brains "ready", potstate "fresh"
+    def test_full_pot_appears_as_present(self):
+        # A full pot that just appears (no gradual on-scale brew observed --
+        # ScriptedScale polls with no time delay, so it reads as a step) is
+        # "present": coffee, but age unknown.  It is NOT "fresh" (that needs
+        # a watched brew).
         sc = ScriptedScale([(795 + 900, True)] * 6)
         src = brewsource.ScaleBrewSource(sc, SETTINGS)
         r = None
         for _ in range(6):
             r = src.poll()
-        self.assertIn(r.pot_state.key, ("fresh", "aging"))
+        self.assertEqual(r.pot_state.key, "present")
         self.assertAlmostEqual(r.raw_grams, 795 + 900)
 
     def test_serial_error_is_swallowed(self):
@@ -90,7 +93,7 @@ class TestScaleBrewSource(unittest.TestCase):
         src = brewsource.ScaleBrewSource(sc, SETTINGS)
         good = src.poll()
         self.assertTrue(good.valid)
-        self.assertIn(good.pot_state.key, ("fresh", "aging"))
+        self.assertEqual(good.pot_state.key, "present")
         moving = src.poll()
         self.assertFalse(moving.valid)
         self.assertTrue(moving.moving)
@@ -114,8 +117,9 @@ class TestScaleBrewSource(unittest.TestCase):
         src = brewsource.ScaleBrewSource(sc, SETTINGS)
         events = [src.poll().event for _ in range(10)]
         self.assertTrue(all(e is None for e in events))
-        # ...and it still settles to a coffee state, not brewing
-        self.assertIn(src.poll().pot_state.key, ("fresh", "aging"))
+        # ...and it settles to "present" (coffee, but age unknown -- we never
+        # watched it brew), NOT "fresh" and NOT "brewing"
+        self.assertEqual(src.poll().pot_state.key, "present")
 
 
 class TestMockBrewSource(unittest.TestCase):
