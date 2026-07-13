@@ -320,7 +320,11 @@ class CarafeWidget(Widget):
 
     # --- drawing -------------------------------------------------------
     def _redraw(self, *_a):
-        self.canvas.clear()
+        # Draw all carafe art into canvas.before and clear only that.  Child
+        # widgets (the target + age labels) live in self.canvas via
+        # add_widget(); clearing self.canvas would wipe them (they are only
+        # added once), which is why they must NOT be cleared here.
+        self.canvas.before.clear()
         x, y = self.pos
         w, h = self.size
         if w <= 0 or h <= 0:
@@ -368,7 +372,7 @@ class CarafeWidget(Widget):
             "fill_max": fill_max,
         }
 
-        with self.canvas:
+        with self.canvas.before:
             # --- angular cantilevered handle on the right (drawn first so
             # the body overlaps its inner end).  Juts right from the top,
             # then drops straight down; squared, chunky, ends free. ---
@@ -539,7 +543,7 @@ class CarafeWidget(Widget):
             side = min(ref_w * 0.86, ref_h * 0.5)
             sx = cxc - side / 2.0
             sy = cyc - side / 2.0
-            with self.canvas:
+            with self.canvas.before:
                 Color(1, 1, 1, 1)  # texture already carries its own color
                 Rectangle(texture=self._hazard_tex, pos=(sx, sy), size=(side, side))
 
