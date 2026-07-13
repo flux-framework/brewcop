@@ -42,11 +42,12 @@ AGING_FRACTION = 0.5
 class PotState:
     """Plain result record (no UI types)."""
 
-    def __init__(self, key, text, fill=0.0, expired=False):
+    def __init__(self, key, text, fill=0.0, expired=False, age=""):
         self.key = key
         self.text = text
         self.fill = fill
         self.expired = expired
+        self.age = age  # compact elapsed string (for the carafe age clock)
 
     def __eq__(self, other):
         return isinstance(other, PotState) and (
@@ -168,6 +169,7 @@ def derive(
             "Coffee: ~{:.2f} L - aging ({})".format(litres, elapsed_txt),
             fill,
             False,
+            age=elapsed_txt,
         )
 
     return PotState(
@@ -175,6 +177,7 @@ def derive(
         "Coffee: ~{:.2f} L - fresh ({})".format(litres, elapsed_txt),
         fill,
         False,
+        age=elapsed_txt,
     )
 
 
