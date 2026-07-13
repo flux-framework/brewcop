@@ -20,7 +20,7 @@ this is exactly the logic that was historically dodgy (see the notification
 storm) and needs to be gotten right.
 
 The UI's home screen consumes a small record describing what to draw:
-  key      one of: no_pot | empty | fresh | aging | stale | brewing
+  key      one of: no_pot | empty | present | brewing | fresh | aging | stale
   text     human-readable status line
   fill     carafe fill fraction 0..1 (ignored by UI when key is no_pot/empty)
   expired  True -> draw empty + blinking biohazard (stale, latched)
@@ -107,7 +107,7 @@ def derive(
     Parameters:
       raw_weight_g      latest raw scale reading in grams (pre-tare)
       weight_is_valid   whether the last poll produced a valid weight
-      brew_state        Brains state: unknown|brewing|ready|present|empty
+      brew_state        Brains state: idle|brewing|ready
       elapsed_s         coffee age (ready) or time-in-state, seconds
       config            pot_tare_g, pot_capacity_ml, empty_thresh_g, stale_hours
       dirty             pot needs cleaning: a batch went stale and the pot
@@ -151,16 +151,15 @@ def derive(
     if net <= empty_thresh:
         return PotState("empty", "Empty pot", fill, False)
 
-    # Pot has coffee.
+    # Brewing (armed via BREW, filling toward the target).
     if brew_state == "brewing":
         return PotState("brewing", "Brewing - {}".format(elapsed_txt), fill, False)
 
-    # Coffee present but never observed brewing (cold start / non-coffee
-    # weight): age unknown -- no freshness claim, no timer.
+    # Coffee present but no active batch (idle): a pot is sitting on the scale
+    # that we were not told to brew -- show the level, but claim no freshness
+    # (no timer).  Reaching "fresh"/"stale" requires an explicit BREW.
     if brew_state != "ready":
-        return PotState(
-            "present", "Coffee: ~{:.2f} L - age unknown".format(litres), fill, False
-        )
+        return PotState("present", "Coffee: ~{:.2f} L".format(litres), fill, False)
 
     # ready and not dirty: fresh -> aging by the (known) age.
     if elapsed_s >= stale_s * AGING_FRACTION:

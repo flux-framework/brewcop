@@ -73,19 +73,18 @@ class TestDerive(unittest.TestCase):
         self.assertAlmostEqual(s.fill, 900 / 1250, places=3)
         self.assertIn("L", s.text)
 
-    def test_present_age_unknown(self):
-        # coffee on the scale but brains never saw it brew -> "present":
+    def test_present_when_idle_with_coffee(self):
+        # coffee on the scale but no active batch (idle) -> "present":
         # level shown, no freshness claim, not expired
-        s = derive(795 + 800, brew_state="present", elapsed=0)
+        s = derive(795 + 800, brew_state="idle", elapsed=0)
         self.assertEqual(s.key, "present")
         self.assertFalse(s.expired)
-        self.assertIn("age unknown", s.text.lower())
         self.assertGreater(s.fill, 0)
 
     def test_present_never_goes_stale(self):
-        # even with a huge elapsed, "present" must not become stale/expired
-        # (staleness requires a known ready age)
-        s = derive(795 + 600, brew_state="present", elapsed=STALE_S * 10)
+        # an idle pot with coffee never becomes stale/expired on its own
+        # (staleness requires an explicit brew -> ready with a known age)
+        s = derive(795 + 600, brew_state="idle", elapsed=STALE_S * 10)
         self.assertEqual(s.key, "present")
         self.assertFalse(s.expired)
 
@@ -116,7 +115,7 @@ class TestDerive(unittest.TestCase):
 
     def test_dirty_empty_pot_still_biohazard(self):
         # a dumped-but-unwashed pot (empty, but dirty) still shows the hazard
-        s = derive(795, brew_state="empty", elapsed=STALE_S, dirty=True)
+        s = derive(795, brew_state="idle", elapsed=STALE_S, dirty=True)
         self.assertTrue(s.expired)
 
     def test_fill_clamped(self):
@@ -126,7 +125,7 @@ class TestDerive(unittest.TestCase):
 
     def test_clean_empty_pot_not_expired(self):
         # an empty, NOT-dirty pot is just "empty" (no nag)
-        s = derive(795, brew_state="empty", elapsed=STALE_S * 5, dirty=False)
+        s = derive(795, brew_state="idle", elapsed=STALE_S * 5, dirty=False)
         self.assertEqual(s.key, "empty")
         self.assertFalse(s.expired)
 
