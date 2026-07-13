@@ -437,37 +437,42 @@ class CarafeWidget(Widget):
                 ]
             )
 
-            # --- draggable brew-target line (dotted) + grab handle ---
+            # --- brew-target line: a dotted line at the target level that
+            # EXTENDS LEFT out past the pot, with the grab handle and label in
+            # the open area beside the carafe (readable against the dark bg,
+            # and an easy drag target away from the pot art). ---
             if self._line_visible and not self._expired:
                 ly_line = by + inset + fill_max * self._target_frac
-                # body half-width at the line height, for span + handle x
+                # body half-width at the line height (right end sits at body)
                 t = (ly_line - by) / body_h
                 hw_line = ((base_w - top_w) * (1 - t) + top_w) / 2
+                x_body_right = cx + hw_line
+                x_grab = x + dp(18)  # far-left end, out past the pot
                 Color(*INK)
-                # dashed line across the body
                 seg = dp(10)
-                xleft, xright = cx - hw_line, cx + hw_line
-                xx = xleft
-                while xx < xright:
-                    x2 = min(xx + seg, xright)
+                xx = x_grab + dp(12)  # line starts just right of the grabber
+                while xx < x_body_right:
+                    x2 = min(xx + seg, x_body_right)
                     Line(points=[xx, ly_line, x2, ly_line], width=dp(1.5))
                     xx += seg * 2  # gap
-                # grab handle (small filled chevron/box) at the right end
+                # yellow grab handle at the LEFT end (out past the pot)
                 Color(*ACCENT)
-                hs = dp(11)
+                hs = dp(16)
                 RoundedRectangle(
-                    pos=(xright - hs, ly_line - hs / 2),
+                    pos=(x_grab - hs / 2, ly_line - hs / 2),
                     size=(hs, hs),
                     radius=[dp(3)],
                 )
 
-        # Position the target label just left of the line (outside canvas ctx).
+        # Target label above the left end of the line (outside canvas ctx),
+        # in the open area past the pot.
         if self._line_visible and not self._expired and self._body:
             ly_line = by + inset + fill_max * self._target_frac
             ml = self._target_frac * self._capacity_ml
-            self._label.text = "{:.2f} L".format(ml / 1000.0)
-            self._label.size = (dp(64), dp(22))
-            self._label.pos = (cx - base_w / 2 - dp(70), ly_line - dp(11))
+            self._label.text = "target {:.0f} mL".format(ml)
+            self._label.halign = "left"
+            self._label.size = (dp(130), dp(20))
+            self._label.pos = (x + dp(10), ly_line + dp(8))
             self._label.opacity = 1
         else:
             self._label.opacity = 0
@@ -710,10 +715,9 @@ class HomeScreen(Screen):
 
         self._pot = pot
         self._render(pot)
-        # Show the draggable target line while setting up or filling a brew
-        # (idle/brewing); hide it once ready (target no longer relevant).
-        state = self.app.source_state()
-        self.carafe.set_line_visible(state in ("idle", "brewing"))
+        # The target line is always shown (the carafe draw hides it only in the
+        # expired/biohazard state, where the target is moot).
+        self.carafe.set_line_visible(True)
         # Let the app refresh the rail's enabled/disabled buttons.
         self.app.refresh_rail()
         # Live weight readout beside the status line: "settling" while moving,
@@ -760,15 +764,11 @@ class HomeScreen(Screen):
             self.status.text = pot.text
             self.status.color = color
 
-        if pot.key == "no_pot":
-            # Nothing counted as a pot: blank centerpiece, no ghost carafe.
-            # (The weight readout still shows the raw grams, if any.)
-            self.carafe.set_state(0.0, GREEN, False)
-            self.carafe.opacity = 0.0
-        else:
-            self.carafe.opacity = 1.0
-            coffee = AMBER if pot.key == "aging" else GREEN
-            self.carafe.set_state(pot.fill, coffee, expired)
+        # Always draw the carafe (even with no pot on the scale it shows as an
+        # empty carafe -- the fixed frame the target line and fill relate to).
+        self.carafe.opacity = 1.0
+        coffee = AMBER if pot.key == "aging" else GREEN
+        self.carafe.set_state(pot.fill, coffee, expired)
         # Actions live in the app-level rail (BREW / CLEAN / WEIGH), enabled
         # per state by App.refresh_rail(); nothing to do here.
 
