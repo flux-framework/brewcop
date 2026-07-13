@@ -767,14 +767,12 @@ class HomeScreen(Screen):
         self.carafe.set_line_visible(True)
         # Let the app refresh the rail's enabled/disabled buttons.
         self.app.refresh_rail()
-        # Live weight readout beside the status line: "settling" while moving,
-        # else the raw grams (blank if we've no reading yet).
-        if result.moving:
-            self.weight_lbl.text = "settling"
-        elif result.raw_grams is not None:
+        # Live weight readout beside the status line.  While the scale is
+        # moving we hold the last good grams rather than flashing "settling"
+        # (which was jarring) -- same as the Weigh screen, which just keeps its
+        # last valid value.  Blank only until we've had a first reading.
+        if result.raw_grams is not None:
             self.weight_lbl.text = "{:.0f} g".format(result.raw_grams)
-        else:
-            self.weight_lbl.text = ""
 
         # Notify + wake on the brewing->ready transition (app gates Slack).
         if result.event == "ready":
