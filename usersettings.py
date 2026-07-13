@@ -36,6 +36,7 @@ DEFAULTS = {
     "empty_thresh_g": 50,  # below this net weight, pot is "empty-ish"
     "pot_tare_g": 795,  # empty Technivorm insulated carafe
     "pot_capacity_ml": 1250,  # full pot (1 g per mL water)
+    "brew_target_ml": 1250,  # last dialed brew amount (persists; default full)
     "dim_timeout_s": 120,  # dim backlight after N s of no touch (0 = never)
     "dim_level": 0.15,  # dimmed brightness fraction (0..1)
     "wake_on_event": True,  # brighten on ready/stale state change
