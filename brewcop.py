@@ -17,22 +17,27 @@ A Kivy touchscreen coffee monitor for the Technivorm at B451.  Reads the
 Avery Berkel scale, interprets weight as brew activity, and shows a live
 carafe (level + freshness, with a blinking biohazard for a stale pot).
 
+Brewing is explicit, user-driven (no weight inference): the user dials the
+water amount and presses BREW; the scale watches the level climb to target
+(or the user presses MARK READY); the batch ages until CLEAN UP.
+
 Screens (three total):
-  Home     -- Flux mark + wordmark, the live carafe, a pot-status line, and
-              a Weigh / (Mark cleaned) action button.  Monitoring is always
-              on; Home is the brew view.
+  Home     -- Flux mark + wordmark, the live carafe, a pot-status line, and a
+              state-driven control row:
+                idle    -> [- mL +]  BREW   WEIGH BEANS
+                brewing -> MARK READY  (manual fallback)
+                ready   -> CLEAN UP    (and biohazard once stale)
   Weigh    -- live scale weight, g/oz units toggle, tare, dosing hint.
   Settings -- Slack on/off + steppers for tunable parameters (usersettings).
 
 Data comes from a brewsource: the real ScaleBrewSource (scale -> Brains ->
 potstate) in normal operation, or a MockBrewSource cycling canned states
-under --mock (for developing the UI without hardware; tap the carafe to
-advance).
+under --mock (tap the mock strip to advance).
 
-Notifications: on a brewing->ready event we notify Slack ONLY IF the user
-setting slack_enabled is on -- which defaults OFF, because the brew detector
-is still over-eager (historically it stormed the channel on every pour) and
-must be retuned against real weight traces first.
+Notifications: on a brew reaching ready we notify Slack ONLY IF the user
+setting slack_enabled is on (default OFF). Because brewing is now explicit,
+a "ready" only ever follows a deliberate BREW -- no more storms from pours
+or placements.
 
 Config: machine facts (serial port, webhook URL, location) come from
 machineconfig (read-only /etc/brewcop/config.toml); tweakable preferences
