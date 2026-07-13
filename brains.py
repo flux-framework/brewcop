@@ -22,17 +22,16 @@ the scale is used only for what it is reliable at: measuring.
 States and transitions:
 
   idle ── start_brew(target_g) ──▶ brewing
-                                     │  weight >= target_g - margin  (auto)
-                                     │  mark_ready()                 (manual)
+                                     │  contents >= target_g  (finished level)
                                      ▼
                                    ready ── clean_up() ──▶ idle
 
 - idle:    no active batch.  The weight still tells the UI whether a pot is
            sitting there, but nothing is claimed about freshness.
 - brewing: armed by BREW; watching the weight climb to the dialed target.
-           Completes automatically when the level reaches the target (within
-           a margin that must cover water the grounds absorb), or manually
-           via mark_ready() as a fallback if the margin is off.
+           target_g is the FINISHED-pot level, so completion is an exact
+           match (within scale noise), no absorption margin.  If a brew
+           stalls short, the user dials the target down to complete it.
 - ready:   ready_time set; coffee ages by wall-clock (ticks even while the
            pot is carried around -- the state is user-driven, so no inference
            is needed to keep it).  is_stale() drives the biohazard once the
@@ -48,15 +47,11 @@ elapsed() gives coffee age while ready, else time in the current state.
 
 import time
 
+from scale import POT_TOLERANCE_G
+
 
 class Brains:
     """Explicit idle/brewing/ready state machine over contents weight."""
-
-    # A brew completes when the settled level reaches its target within this
-    # margin.  The margin must cover the water the grounds absorb (a "full"
-    # brew yields somewhat less in the carafe).  Provisional; tune against a
-    # real brew trace.  The manual mark_ready() fallback covers a bad margin.
-    BREW_TARGET_MARGIN_G = 150
 
     def __init__(self, tick_period=1, empty_thresh=0, now=time.time):
         # tick_period accepted for API compatibility; unused now.
@@ -75,13 +70,6 @@ class Brains:
         self.ready_time = None
         self._set_state("brewing")
 
-    def mark_ready(self):
-        """Manual completion fallback (brew finished but under the margin).
-        Returns "ready" if it caused the transition, else None."""
-        if self.state == "brewing":
-            return self._become_ready()
-        return None
-
     def clean_up(self):
         """CLEAN UP pressed: batch dealt with, return to idle."""
         self.ready_time = None
@@ -92,12 +80,15 @@ class Brains:
     def store(self, net):
         """
         Record a contents-weight sample (grams, net of tare).  While brewing,
-        auto-completes to ready when the level reaches the target.  Returns
-        "ready" on that transition, else None.
+        completes to ready when the level reaches the dialed target (which is
+        the finished-pot level, so this is an exact match within scale noise
+        -- no absorption margin).  Returns "ready" on that transition, else
+        None.  If a brew stalls short, the user dials the target down to the
+        level actually reached, which completes it (dial-to-complete).
         """
         self._net = net
         if self.state == "brewing" and self.target_g is not None:
-            if net >= self.target_g - self.BREW_TARGET_MARGIN_G:
+            if net >= self.target_g - POT_TOLERANCE_G:
                 return self._become_ready()
         return None
 

@@ -14,8 +14,8 @@
 Tests for brains.Brains: the explicit, user-driven brew state machine.
 
 Weight is fed as CONTENTS grams (net of pot tare).  Transitions are driven by
-start_brew / mark_ready / clean_up, plus weight reaching the target while
-brewing.  An injectable clock makes ages deterministic.
+start_brew / clean_up, plus weight reaching the dialed target while brewing.
+An injectable clock makes ages deterministic.
 """
 
 import os
@@ -48,20 +48,19 @@ class TestBrains(unittest.TestCase):
         b, _ = make()
         self.assertEqual(b.state, "idle")
 
-    def test_brew_autocompletes_at_target(self):
+    def test_brew_completes_at_target_level(self):
+        # target_g is the finished-pot level -> exact match (within noise),
+        # NO absorption margin.  Under-target stays brewing.
         b, clk = make()
         b.start_brew(target_g=1250)
         self.assertEqual(b.state, "brewing")
-        # partial fills stay brewing
-        self.assertIsNone(b.store(300))
+        self.assertIsNone(b.store(300))  # partial
         self.assertEqual(b.state, "brewing")
-        self.assertIsNone(b.store(900))
+        self.assertIsNone(b.store(1100))  # still short of target
         self.assertEqual(b.state, "brewing")
-        # reaching target - margin completes
-        event = b.store(1250 - brains.Brains.BREW_TARGET_MARGIN_G)
+        event = b.store(1250)  # reaches the dialed finished level
         self.assertEqual(event, "ready")
         self.assertEqual(b.state, "ready")
-        self.assertIsNotNone(b.ready_time)
 
     def test_dribble_without_brew_does_nothing(self):
         # weight appearing while IDLE is never a brew (no inference)
@@ -71,24 +70,22 @@ class TestBrains(unittest.TestCase):
             self.assertIsNone(event)
         self.assertEqual(b.state, "idle")
 
-    def test_mark_ready_manual_fallback(self):
+    def test_dial_down_to_complete_a_short_brew(self):
+        # a brew that stalls below the dialed level completes when the user
+        # dials the target down to the level actually reached
         b, clk = make()
         b.start_brew(target_g=1250)
-        b.store(900)  # under target, still brewing
+        b.store(1050)  # stalled short
         self.assertEqual(b.state, "brewing")
-        event = b.mark_ready()
+        b.start_brew(target_g=1050)  # re-arm at the reached level
+        event = b.store(1050)
         self.assertEqual(event, "ready")
         self.assertEqual(b.state, "ready")
-
-    def test_mark_ready_noop_when_not_brewing(self):
-        b, _ = make()
-        self.assertIsNone(b.mark_ready())  # idle
-        self.assertEqual(b.state, "idle")
 
     def test_clean_up_returns_to_idle(self):
         b, clk = make()
         b.start_brew(target_g=1250)
-        b.store(1200)  # -> ready
+        b.store(1250)  # -> ready
         self.assertEqual(b.state, "ready")
         b.clean_up()
         self.assertEqual(b.state, "idle")
@@ -97,7 +94,7 @@ class TestBrains(unittest.TestCase):
     def test_age_ticks_while_ready(self):
         b, clk = make()
         b.start_brew(target_g=1250)
-        b.store(1200)  # ready
+        b.store(1250)  # ready
         clk.advance(42)
         self.assertAlmostEqual(b.elapsed(), 42)
 
@@ -106,7 +103,7 @@ class TestBrains(unittest.TestCase):
         # (user-driven -- removal is not a transition)
         b, clk = make()
         b.start_brew(target_g=1250)
-        b.store(1200)  # ready
+        b.store(1250)  # ready
         rt = b.ready_time
         clk.advance(1800)
         b.store(-800)  # pot off the scale
@@ -117,7 +114,7 @@ class TestBrains(unittest.TestCase):
     def test_is_stale(self):
         b, clk = make()
         b.start_brew(target_g=1250)
-        b.store(1200)  # ready
+        b.store(1250)  # ready
         stale = 4 * 3600
         self.assertFalse(b.is_stale(stale))
         clk.advance(stale + 10)
@@ -143,7 +140,7 @@ class TestPersistence(unittest.TestCase):
     def test_snapshot_restore_preserves_ready_age(self):
         b, clk = make()
         b.start_brew(target_g=1250)
-        b.store(1200)  # ready
+        b.store(1250)  # ready
         snap = b.snapshot()
         clk.advance(3600)  # an hour (incl. any downtime)
         b2 = brains.Brains(empty_thresh=50, now=clk)
@@ -160,7 +157,7 @@ class TestPersistence(unittest.TestCase):
         self.assertEqual(b2.state, "brewing")
         self.assertEqual(b2.target_g, 1250)
         # still completes at target after restore
-        self.assertEqual(b2.store(1200), "ready")
+        self.assertEqual(b2.store(1250), "ready")
 
     def test_restore_none_is_noop(self):
         b, _ = make()
