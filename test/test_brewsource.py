@@ -83,10 +83,8 @@ class TestScaleBrewSource(unittest.TestCase):
         self.assertTrue(r.valid)
 
     def test_full_pot_appears_as_present(self):
-        # A full pot that just appears (no gradual on-scale brew observed --
-        # ScriptedScale polls with no time delay, so it reads as a step) is
-        # "present": coffee, but age unknown.  It is NOT "fresh" (that needs
-        # a watched brew).
+        # A pot that just appears while IDLE (no explicit BREW) is "present":
+        # coffee on the scale, but no active batch -> no freshness claim.
         sc = ScriptedScale([(795 + 900, True)] * 6)
         src = brewsource.ScaleBrewSource(sc, SETTINGS)
         r = None
@@ -123,19 +121,38 @@ class TestScaleBrewSource(unittest.TestCase):
         self.assertFalse(r.moving)
 
     def test_placing_full_pot_emits_no_ready(self):
-        # Setting a full pot on the scale (a step jump) must NOT fire a
-        # "ready" event -- only a gradual on-scale brew does.  This is the
-        # notification-storm fix at the source layer.  (Brew *timing* is
-        # rate-based and covered with an injectable clock in test_brains;
-        # ScriptedScale here polls with no time delay, so every change reads
-        # as an instantaneous step -- exactly the placement case.)
+        # Setting a full pot on the scale while IDLE must NOT fire a "ready"
+        # event -- only an explicit BREW that reaches target does.  This is
+        # the notification-storm fix: no BREW pressed, so no notification.
         sc = ScriptedScale([(795 + 900, True)] * 10)
         src = brewsource.ScaleBrewSource(sc, SETTINGS)
         events = [src.poll().event for _ in range(10)]
         self.assertTrue(all(e is None for e in events))
-        # ...and it settles to "present" (coffee, but age unknown -- we never
-        # watched it brew), NOT "fresh" and NOT "brewing"
         self.assertEqual(src.poll().pot_state.key, "present")
+
+    def test_brew_cycle(self):
+        # start_brew -> filling stays "brewing" -> reaching target emits ready
+        sc = ScriptedScale([(795 + 300, True), (795 + 1200, True)])
+        src = brewsource.ScaleBrewSource(sc, SETTINGS)
+        src.start_brew(target_g=1250)
+        r1 = src.poll()  # 300 g contents, under target
+        self.assertEqual(r1.pot_state.key, "brewing")
+        self.assertIsNone(r1.event)
+        r2 = src.poll()  # 1200 g contents, past target - margin
+        self.assertEqual(r2.event, "ready")
+        self.assertIn(r2.pot_state.key, ("fresh", "aging"))
+        # clean up -> back to idle; a full pot now reads "present"
+        src.clean_up()
+        r3 = src.poll()
+        self.assertEqual(r3.pot_state.key, "present")
+
+    def test_mark_ready_fallback(self):
+        sc = ScriptedScale([(795 + 800, True)] * 3)
+        src = brewsource.ScaleBrewSource(sc, SETTINGS)
+        src.start_brew(target_g=1250)
+        self.assertEqual(src.poll().pot_state.key, "brewing")  # under target
+        self.assertEqual(src.mark_ready(), "ready")  # manual completion
+        self.assertIn(src.poll().pot_state.key, ("fresh", "aging"))
 
     def test_restores_persisted_ready_state(self):
         # A saved "ready" snapshot from a prior run is restored on init, so a

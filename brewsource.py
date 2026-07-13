@@ -73,10 +73,7 @@ class ScaleBrewSource:
         # in motion (a bump, a pour).
         self._last_pot = potstate.PotState("no_pot", "No pot on scale", 0.0, False)
 
-    def poll(self, target_g=None):
-        # target_g: expected finished-brew level (full/half pot, grams) so an
-        # under-target settle isn't declared a completed brew.  None = accept
-        # any settled brew.
+    def poll(self):
         # Read the scale (never let a serial hiccup crash the caller).
         try:
             self._scale.poll()
@@ -98,7 +95,7 @@ class ScaleBrewSource:
         # matching how the original code stored w = weight - tare.  Brains
         # only cares about relative change + empty thresh.
         net = potstate.net_contents_g(raw, self._settings["pot_tare_g"])
-        event = self._brains.store(net, target_g=target_g)
+        event = self._brains.store(net)
         self._maybe_persist()
 
         stale_s = float(self._settings["stale_hours"]) * 3600.0
@@ -108,14 +105,27 @@ class ScaleBrewSource:
             brew_state=self._brains.state,
             elapsed_s=self._brains.elapsed(),
             config=self._settings,
-            dirty=self._brains.is_dirty(stale_s),
+            # "dirty" (biohazard) is simply a ready batch aged past stale;
+            # cleanup returns to idle, which clears it.
+            dirty=self._brains.is_stale(stale_s),
         )
         self._last_pot = pot
         return PollResult(pot, event=event, raw_grams=raw, valid=True, moving=False)
 
-    def clean(self):
-        """Record a pot cleaning (CLEAN button); persist the change."""
-        self._brains.clean()
+    def start_brew(self, target_g):
+        """BREW pressed: arm brewing toward target_g grams of contents."""
+        self._brains.start_brew(target_g)
+        self._maybe_persist()
+
+    def mark_ready(self):
+        """Manual brew-complete fallback.  Returns "ready" if it fired."""
+        event = self._brains.mark_ready()
+        self._maybe_persist()
+        return event
+
+    def clean_up(self):
+        """CLEAN UP pressed: batch dealt with, return to idle."""
+        self._brains.clean_up()
         self._maybe_persist()
 
     def _maybe_persist(self):
@@ -141,14 +151,23 @@ class MockBrewSource:
         self._states = list(states)
         self._i = 0
 
-    def poll(self, target_g=None):
-        # target_g ignored: mock states are canned, not weight-derived.
+    def poll(self):
         st = self._states[self._i]
         return PollResult(st, event=None, raw_grams=None, valid=True)
 
     def advance(self):
         """Move to the next mock state (e.g. on a screen tap)."""
         self._i = (self._i + 1) % len(self._states)
+
+    # Transition methods are no-ops in mock (states are canned + cycled).
+    def start_brew(self, target_g):
+        pass
+
+    def mark_ready(self):
+        return None
+
+    def clean_up(self):
+        pass
 
 
 # vim: tabstop=4 shiftwidth=4 expandtab
