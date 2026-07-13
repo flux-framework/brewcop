@@ -17,19 +17,19 @@ A Kivy touchscreen coffee monitor for the Technivorm at B451.  Reads the
 Avery Berkel scale, interprets weight as brew activity, and shows a live
 carafe (level + freshness, with a blinking biohazard for a stale pot).
 
-Brewing is explicit, user-driven (no weight inference): the user dials the
-finished-pot level and presses BREW; the scale watches the level climb until
-it reaches that target; the batch ages until CLEAN UP.  If a brew stalls
-short, the user dials the target down to the level reached (dial-to-complete)
--- so there is no separate "mark ready" button.
+Brewing is explicit, user-driven (no weight inference): the user sets the
+finished-pot level by dragging the dotted target line on the carafe, presses
+BREW, and the scale watches the level climb until it reaches that line; the
+batch ages until CLEAN UP.  If a brew stalls short, the user drags the line
+down to the level reached (dial-to-complete) -- no separate "mark ready".
+
+A fixed action rail (BREW / CLEAN / WEIGH) sits on the right of every screen;
+buttons enable/disable by brew state but never move.
 
 Screens (three total):
-  Home     -- Flux mark + wordmark, the live carafe (left), and a contextual
-              vertical action stack (right):
-                idle    -> [- L +] dial, BREW, WEIGH BEANS
-                brewing -> WEIGH BEANS   (brew completes by weight)
-                ready   -> CLEAN UP, WEIGH BEANS   (+ biohazard once stale)
-  Weigh    -- live scale weight, g/oz units toggle, tare, dosing hint.
+  Home     -- Flux mark + wordmark, the live carafe with its draggable target
+              line, and a pot-status line.
+  Weigh    -- live scale weight, g/oz units toggle, tare, dosing hint, Back.
   Settings -- Slack on/off + steppers for tunable parameters (usersettings).
 
 Data comes from a brewsource: the real ScaleBrewSource (scale -> Brains ->
@@ -623,16 +623,16 @@ class HomeScreen(Screen):
         top.add_widget(gear)
         root.add_widget(top)
 
-        # Body: carafe centerpiece on the left, a vertical action stack on the
-        # right.  The stack is contextual -- only valid actions for the current
-        # brew state appear.
-        body = BoxLayout(orientation="horizontal", spacing=dp(16))
-
+        # Carafe centerpiece.  The brew target is set by dragging the dotted
+        # line on the carafe itself (no separate dial); the BREW/CLEAN/WEIGH
+        # actions live in the app-level rail to the right of all screens.
         center = FloatLayout()
         self.carafe = CarafeWidget(size_hint=(None, None))
+        self.carafe.on_target = self._on_target_dragged
+        self.carafe.set_capacity_ml(self.app.settings["pot_capacity_ml"])
 
         def _place_carafe(*_a):
-            side = min(center.width * 0.78, center.height * 0.82)
+            side = min(center.width * 0.62, center.height * 0.88)
             self.carafe.size = (side, side * 1.05)
             self.carafe.pos = (
                 center.x + (center.width - self.carafe.width) / 2,
@@ -641,18 +641,7 @@ class HomeScreen(Screen):
 
         center.bind(pos=_place_carafe, size=_place_carafe)
         center.add_widget(self.carafe)
-        body.add_widget(center)
-
-        # Right-hand action stack (fixed width column).
-        self._stack = BoxLayout(
-            orientation="vertical",
-            spacing=dp(12),
-            size_hint_x=None,
-            width=dp(190),
-        )
-        self._build_actions()
-        body.add_widget(self._stack)
-        root.add_widget(body)
+        root.add_widget(center)
 
         # Status row (full width, below the body): pot-status centered, live
         # raw-weight readout to the right (swaps to "settling" while moving).
@@ -697,64 +686,17 @@ class HomeScreen(Screen):
 
         self.add_widget(root)
         self._pot = potstate.PotState("no_pot", "", 0.0, False)
-        # Seed the dialed target from the persisted setting.
+        # Seed the target line from the persisted brew amount.
         self._target_ml = self.app.settings["brew_target_ml"]
+        cap = self.app.settings["pot_capacity_ml"]
+        self.carafe.set_target_frac(self._target_ml / cap if cap else 1.0)
         self.tick()
 
-    def _build_actions(self):
-        """Build the reusable RHS action widgets (shown contextually)."""
-        self._brew_btn = FlatButton(
-            text="BREW", bg=ACCENT, fg=(1, 1, 1, 1), font_size=sp(26), bold=True
-        )
-        self._brew_btn.bind(on_release=lambda *_a: self._start_brew())
-
-        self._clean_btn = FlatButton(
-            text="CLEAN UP",
-            bg=HAZARD,
-            fg=(0.1, 0.1, 0.1, 1),
-            font_size=sp(24),
-            bold=True,
-        )
-        self._clean_btn.bind(on_release=lambda *_a: self._clean_up())
-
-        self._weigh_btn = FlatButton(
-            text="WEIGH\nBEANS",
-            bg=PANEL,
-            fg=INK,
-            font_size=sp(20),
-            bold=True,
-            halign="center",
-            size_hint_y=None,
-            height=dp(80),
-        )
-        self._weigh_btn.bind(on_release=lambda *_a: self.go("weigh"))
-
-        # Compact mL dial (idle only), stacked: label over [- +] row.
-        self._dial_box = BoxLayout(
-            orientation="vertical", size_hint_y=None, height=dp(76), spacing=dp(4)
-        )
-        self._dial_lbl = Label(
-            text="",
-            color=INK,
-            font_size=sp(18),
-            bold=True,
-            size_hint_y=None,
-            height=dp(28),
-            halign="center",
-            valign="middle",
-        )
-        self._dial_lbl.bind(size=lambda w, s: setattr(w, "text_size", s))
-        dial_row = BoxLayout(orientation="horizontal", spacing=dp(8))
-        minus = FlatButton(text="-", bg=PANEL, font_size=sp(26), bold=True)
-        minus.bind(on_release=lambda *_a: self._step_target(-250))
-        plus = FlatButton(text="+", bg=PANEL, font_size=sp(26), bold=True)
-        plus.bind(on_release=lambda *_a: self._step_target(+250))
-        dial_row.add_widget(minus)
-        dial_row.add_widget(plus)
-        self._dial_box.add_widget(self._dial_lbl)
-        self._dial_box.add_widget(dial_row)
-
-        self._stack_shown = None  # which contextual layout is up
+    def _on_target_dragged(self, ml):
+        # The carafe target line was dragged; persist the new brew amount.
+        self._target_ml = ml
+        self.app.settings["brew_target_ml"] = ml
+        self.app.settings.save()
 
     def tick(self, *_a):
         """Poll the source, render, fire events."""
@@ -768,7 +710,12 @@ class HomeScreen(Screen):
 
         self._pot = pot
         self._render(pot)
-        self._show_controls_for(pot)
+        # Show the draggable target line while setting up or filling a brew
+        # (idle/brewing); hide it once ready (target no longer relevant).
+        state = self.app.source_state()
+        self.carafe.set_line_visible(state in ("idle", "brewing"))
+        # Let the app refresh the rail's enabled/disabled buttons.
+        self.app.refresh_rail()
         # Live weight readout beside the status line: "settling" while moving,
         # else the raw grams (blank if we've no reading yet).
         if result.moving:
@@ -786,66 +733,10 @@ class HomeScreen(Screen):
             self.app.wake(pot)
         self._last_key = pot.key
 
-    def _step_target(self, delta_ml):
-        cap = self.app.settings["pot_capacity_ml"]
-        self._target_ml = max(250, min(cap, self._target_ml + delta_ml))
-        self.app.settings["brew_target_ml"] = self._target_ml
-        self.app.settings.save()  # persist the dialed amount
-        self._refresh_dial()
-
-    def _refresh_dial(self):
-        self._dial_lbl.text = "{:.2f} L".format(self._target_ml / 1000.0)
-
-    def _start_brew(self):
-        # BREW: arm the state machine toward the dialed target (grams ~= mL).
-        self.app.source.start_brew(target_g=self._target_ml)
-        self.tick()
-
-    def _clean_up(self):
-        # CLEAN UP: only meaningful once the pot is empty/absent (you can't
-        # wash a full pot).  Otherwise hint.
-        if self.app.mock:
-            self.app.source.advance()
-            self.tick()
-            return
-        if self._pot.key in ("empty", "no_pot"):
-            self.app.source.clean_up()
-            self.tick()
-        else:
-            self._flash("Empty the pot first")
-
     def _cycle(self):
         # --mock only: advance canned states.
         self.app.source.advance()
         self.tick()
-
-    def _show_controls_for(self, pot):
-        # Populate the RHS stack with the actions valid for this state:
-        #   idle    -> dial, BREW, WEIGH
-        #   brewing -> WEIGH   (brew completes by weight; nothing else to press)
-        #   ready   -> CLEAN UP, WEIGH   (CLEAN UP also handles the stale/dirty
-        #              case, since stale is just a ready batch aged out)
-        brew_state = self.app.source_state()
-        if pot.expired:
-            brew_state = "ready"
-        if brew_state == self._stack_shown:
-            if brew_state == "idle":
-                self._refresh_dial()
-            return
-        self._stack_shown = brew_state
-
-        self._stack.clear_widgets()
-        if brew_state == "brewing":
-            self._stack.add_widget(Widget())  # push WEIGH to the bottom
-            self._stack.add_widget(self._weigh_btn)
-        elif brew_state == "ready":
-            self._stack.add_widget(self._clean_btn)
-            self._stack.add_widget(self._weigh_btn)
-        else:  # idle
-            self._stack.add_widget(self._dial_box)
-            self._stack.add_widget(self._brew_btn)
-            self._stack.add_widget(self._weigh_btn)
-            self._refresh_dial()
 
     def _flash(self, msg, seconds=2.0):
         # Briefly show a message on the status line, holding it against the
@@ -878,8 +769,8 @@ class HomeScreen(Screen):
             self.carafe.opacity = 1.0
             coffee = AMBER if pot.key == "aging" else GREEN
             self.carafe.set_state(pot.fill, coffee, expired)
-        # The bottom control row (BREW / MARK READY / CLEAN UP) is swapped by
-        # _show_controls_for(); nothing to do here.
+        # Actions live in the app-level rail (BREW / CLEAN / WEIGH), enabled
+        # per state by App.refresh_rail(); nothing to do here.
 
 
 # --- Weigh ---------------------------------------------------------------
@@ -1266,13 +1157,53 @@ class BrewcopApp(App):
         self.sm.add_widget(WeighScreen(go, self, name="weigh"))
         self.sm.add_widget(SettingsScreen(go, self.settings, name="settings"))
 
+        # Fixed action rail (BREW / CLEAN / WEIGH), present on every screen.
+        # Buttons enable/disable by brew state; the layout never moves, so the
+        # verbs are always in the same place (spatial muscle memory).
+        rail = BoxLayout(
+            orientation="vertical",
+            spacing=dp(12),
+            padding=[0, dp(24)],
+            size_hint_x=None,
+            width=dp(150),
+        )
+        self._brew_btn = FlatButton(
+            text="BREW", bg=ACCENT, fg=(1, 1, 1, 1), font_size=sp(24), bold=True
+        )
+        self._brew_btn.bind(on_release=lambda *_a: self._rail_brew())
+        self._clean_btn = FlatButton(
+            text="CLEAN\nUP",
+            bg=HAZARD,
+            fg=(0.1, 0.1, 0.1, 1),
+            font_size=sp(22),
+            bold=True,
+            halign="center",
+        )
+        self._clean_btn.bind(on_release=lambda *_a: self._rail_clean())
+        self._weigh_btn = FlatButton(
+            text="WEIGH\nBEANS",
+            bg=PANEL,
+            fg=INK,
+            font_size=sp(20),
+            bold=True,
+            halign="center",
+        )
+        self._weigh_btn.bind(on_release=lambda *_a: self._go("weigh"))
+        for b in (self._brew_btn, self._clean_btn, self._weigh_btn):
+            rail.add_widget(b)
+
+        outer = BoxLayout(orientation="horizontal")
+        outer.add_widget(self.sm)
+        outer.add_widget(rail)
+
         # Drive the Home brew tick continuously (Home is the always-on view).
         # In --mock, don't auto-advance: the user taps to cycle.
         if not self.mock:
             Clock.schedule_interval(self.home.tick, TICK_PERIOD)
 
         self._reset_idle_timer()
-        return self.sm
+        self.refresh_rail()
+        return outer
 
     # --- events from the Home screen ----------------------------------
     def on_ready_event(self, result):
@@ -1328,11 +1259,48 @@ class BrewcopApp(App):
         return False
 
     def source_state(self):
-        # Brew state ("idle"/"brewing"/"ready") for choosing Home controls.
-        # Mock has no state machine -> treat as idle (controls still show, and
-        # the mock cycle strip drives the display).
+        # Brew state ("idle"/"brewing"/"ready") for enabling rail buttons.
+        # Mock has no state machine -> treat as idle.
         brains = getattr(self.source, "_brains", None)
         return brains.state if brains is not None else "idle"
+
+    # --- action rail ---------------------------------------------------
+    def refresh_rail(self):
+        # Enable/disable the fixed rail buttons per brew state:
+        #   BREW  - only when idle (must CLEAN UP before brewing again)
+        #   CLEAN - only when ready (a batch exists to deal with)
+        #   WEIGH - always
+        state = self.source_state()
+        if self.mock:
+            # No real state machine; keep everything live so the mock is usable.
+            self._enable(self._brew_btn, True)
+            self._enable(self._clean_btn, True)
+            return
+        self._enable(self._brew_btn, state == "idle")
+        self._enable(self._clean_btn, state == "ready")
+
+    @staticmethod
+    def _enable(btn, on):
+        btn.disabled = not on
+        btn.opacity = 1.0 if on else 0.35
+
+    def _rail_brew(self):
+        if self.source_state() != "idle":
+            return
+        self._go("home")
+        self.source.start_brew(target_g=self.home._target_ml)
+        self.home.tick()
+
+    def _rail_clean(self):
+        if self.source_state() != "ready":
+            return
+        self._go("home")
+        # Can't wash a full pot: require empty/absent first.
+        if self.home._pot.key in ("empty", "no_pot"):
+            self.source.clean_up()
+            self.home.tick()
+        else:
+            self.home._flash("Empty the pot first")
 
     def _go(self, name):
         self.sm.transition.direction = "right" if name == "home" else "left"
