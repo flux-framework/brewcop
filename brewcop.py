@@ -212,6 +212,20 @@ class CarafeWidget(Widget):
         )
         self._label.bind(size=lambda w, s: setattr(w, "text_size", s))
         self.add_widget(self._label)
+        # Age clock shown inside the body while coffee is fresh/aging (the
+        # biohazard takes over once stale).
+        self._age_text = ""
+        self._age_label = Label(
+            text="",
+            font_size=sp(30),
+            bold=True,
+            color=(1, 1, 1, 0.92),
+            size_hint=(None, None),
+            halign="center",
+            valign="middle",
+        )
+        self._age_label.bind(size=lambda w, s: setattr(w, "text_size", s))
+        self.add_widget(self._age_label)
         # Load the biohazard PNG once; tolerate it being absent (fall back to
         # no image -- the caption still conveys the warning).
         try:
@@ -221,10 +235,11 @@ class CarafeWidget(Widget):
         self.bind(pos=self._redraw, size=self._redraw)
 
     # --- public state --------------------------------------------------
-    def set_state(self, fill, coffee_rgba, expired):
+    def set_state(self, fill, coffee_rgba, expired, age_text=""):
         self._fill = max(0.0, min(1.0, fill))
         self._coffee = coffee_rgba
         self._expired = expired
+        self._age_text = age_text  # shown inside the body while fresh/aging
         show_hazard = expired and self._fill > 0.02
         self._set_blinking(show_hazard)
         self._redraw()
@@ -484,6 +499,17 @@ class CarafeWidget(Widget):
         if self._expired and self._fill > 0.02:
             body_cy = by + body_h * 0.42
             self._draw_hazard(cx, body_cy, min(top_w, base_w), body_h)
+
+        # Age clock inside the body while fresh/aging (not expired, and we
+        # have an age to show).  This is the counterpart to the biohazard:
+        # clock = good coffee + how old; biohazard = stale.
+        if self._age_text and not self._expired:
+            self._age_label.text = self._age_text
+            self._age_label.size = (min(top_w, base_w), dp(40))
+            self._age_label.pos = (cx - min(top_w, base_w) / 2, by + body_h * 0.5)
+            self._age_label.opacity = 1
+        else:
+            self._age_label.opacity = 0
 
     def _poly(self, pts):
         """Fill a convex polygon (flat x,y list) via a Mesh triangle fan,
@@ -757,18 +783,19 @@ class HomeScreen(Screen):
 
     def _render(self, pot):
         expired = pot.expired  # dirtiness decided by Brains, carried here
-        color = STATE_COLOR.get(pot.key, INK)
-        # While a transient message is flashing, leave the status line alone
-        # (the carafe/button/weight still update normally).
+        # No persistent status text: the carafe (fill + age clock + biohazard)
+        # and the weight readout carry the state visually.  The status label is
+        # used only for transient flash messages; clear it when not flashing.
         if not self._flashing:
-            self.status.text = pot.text
-            self.status.color = color
+            self.status.text = ""
 
         # Always draw the carafe (even with no pot on the scale it shows as an
         # empty carafe -- the fixed frame the target line and fill relate to).
+        # Show the age clock inside the body while the coffee is fresh/aging.
         self.carafe.opacity = 1.0
         coffee = AMBER if pot.key == "aging" else GREEN
-        self.carafe.set_state(pot.fill, coffee, expired)
+        age_text = pot.age if pot.key in ("fresh", "aging") else ""
+        self.carafe.set_state(pot.fill, coffee, expired, age_text=age_text)
         # Actions live in the app-level rail (BREW / CLEAN / WEIGH), enabled
         # per state by App.refresh_rail(); nothing to do here.
 
@@ -1270,8 +1297,9 @@ class BrewcopApp(App):
     # --- action rail ---------------------------------------------------
     def refresh_rail(self):
         # Enable/disable the fixed rail buttons per brew state:
-        #   BREW  - only when idle (must CLEAN UP before brewing again)
-        #   CLEAN - only when ready (a batch exists to deal with)
+        #   BREW  - only when idle.  A ready batch (even an emptied one) must
+        #           be CLEANed first; the biohazard signals that.
+        #   CLEAN - when a ready batch exists to deal with
         #   WEIGH - always
         state = self.source_state()
         if self.mock:
