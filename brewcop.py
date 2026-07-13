@@ -484,7 +484,7 @@ class CarafeWidget(Widget):
         if self._line_visible and not self._expired and self._body:
             ly_line = by + inset + fill_max * self._target_frac
             ml = self._target_frac * self._capacity_ml
-            self._label.text = "target {:.0f} mL".format(ml)
+            self._label.text = "extraction {:.0f} mL".format(ml)
             self._label.halign = "left"
             self._label.size = (dp(130), dp(20))
             self._label.pos = (x + dp(10), ly_line + dp(8))
@@ -1299,7 +1299,9 @@ class BrewcopApp(App):
         # Enable/disable the fixed rail buttons per brew state:
         #   BREW  - only when idle.  A ready batch (even an emptied one) must
         #           be CLEANed first; the biohazard signals that.
-        #   CLEAN - when a ready batch exists to deal with
+        #   CLEAN - when NOT idle: cleans up a ready batch, or cancels/aborts a
+        #           brew in progress.  (Without this, "brewing" would be a
+        #           dead end with both buttons greyed.)
         #   WEIGH - always
         state = self.source_state()
         if self.mock:
@@ -1308,7 +1310,7 @@ class BrewcopApp(App):
             self._enable(self._clean_btn, True)
             return
         self._enable(self._brew_btn, state == "idle")
-        self._enable(self._clean_btn, state == "ready")
+        self._enable(self._clean_btn, state != "idle")
 
     @staticmethod
     def _enable(btn, on):
@@ -1323,10 +1325,17 @@ class BrewcopApp(App):
         self.home.tick()
 
     def _rail_clean(self):
-        if self.source_state() != "ready":
+        state = self.source_state()
+        if state == "idle":
             return
         self._go("home")
-        # Can't wash a full pot: require empty/absent first.
+        if state == "brewing":
+            # Abort a brew in progress -> back to idle (no empty-guard: there's
+            # no finished batch to protect).
+            self.source.clean_up()
+            self.home.tick()
+            return
+        # ready: can't wash a full pot -- require empty/absent first.
         if self.home._pot.key in ("empty", "no_pot"):
             self.source.clean_up()
             self.home.tick()
