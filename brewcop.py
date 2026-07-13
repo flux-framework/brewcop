@@ -443,7 +443,6 @@ class HomeScreen(Screen):
         self.app = app  # for source.poll(), notify(), settings
         self._last_key = None  # for wake-on-event edge detection
         self._flashing = False  # suppress status updates while flashing a msg
-        self._half_pot = False  # brew target: half pot vs full (resets each boot)
         root = BoxLayout(orientation="vertical", padding=dp(24), spacing=dp(16))
 
         # top bar: title centered across the FULL width (badge + settings
@@ -530,19 +529,6 @@ class HomeScreen(Screen):
         )
         self.weight_lbl.bind(size=lambda w, s: setattr(w, "text_size", s))
         statusbar.add_widget(self.weight_lbl)
-        # Brew-size selector (left): toggles the target a brew must reach to
-        # count as done.  Resets to full each boot.
-        self.size_btn = FlatButton(
-            text="Full pot",
-            bg=PANEL,
-            fg=INK,
-            font_size=sp(14),
-            size_hint=(None, None),
-            size=(dp(96), dp(34)),
-            pos_hint={"x": 0, "center_y": 0.5},
-        )
-        self.size_btn.bind(on_release=lambda *_a: self._toggle_pot_size())
-        statusbar.add_widget(self.size_btn)
         root.add_widget(statusbar)
 
         # In --mock mode only, a strip to advance the canned states.
@@ -558,26 +544,99 @@ class HomeScreen(Screen):
             cycle.bind(on_release=lambda *_a: self._cycle())
             root.add_widget(cycle)
 
-        # Bottom action button.  Normally "WEIGH BEANS" (the only interactive
-        # mode, since monitoring is always-on).  When a pot is stale, it
-        # becomes "MARK CLEANED": the biohazard latches until a human
-        # confirms the pot was dealt with -- so a top-up (weight rising)
-        # can't silently clear a contaminated pot.
-        self.action = FlatButton(
-            text="WEIGH BEANS",
+        # State-driven control area at the bottom.  Exactly one of three rows
+        # is shown depending on the brew state:
+        #   idle    -> [- mL +]  BREW   WEIGH BEANS
+        #   brewing -> MARK READY  (manual fallback if the target is missed)
+        #   ready   -> CLEAN UP    (also the CLEAN-when-stale action)
+        self._controls = FloatLayout(size_hint_y=None, height=dp(96))
+        self._build_idle_controls()
+        self._build_brewing_controls()
+        self._build_ready_controls()
+        root.add_widget(self._controls)
+
+        self.add_widget(root)
+        self._pot = potstate.PotState("no_pot", "", 0.0, False)
+        # Seed the dialed target from the persisted setting.
+        self._target_ml = self.app.settings["brew_target_ml"]
+        self.tick()
+
+    def _full(self):
+        # Fill a control row across the whole control area.
+        return {"size": (1, 1), "pos_hint": {"x": 0, "y": 0}}
+
+    def _build_idle_controls(self):
+        self._idle_row = BoxLayout(
+            orientation="horizontal", spacing=dp(12), **self._full()
+        )
+        minus = FlatButton(
+            text="-",
+            bg=PANEL,
+            font_size=sp(30),
+            bold=True,
+            size_hint_x=None,
+            width=dp(64),
+        )
+        minus.bind(on_release=lambda *_a: self._step_target(-250))
+        self._dial_lbl = Label(
+            text="",
+            color=INK,
+            font_size=sp(20),
+            bold=True,
+            size_hint_x=None,
+            width=dp(150),
+            halign="center",
+            valign="middle",
+        )
+        self._dial_lbl.bind(size=lambda w, s: setattr(w, "text_size", s))
+        plus = FlatButton(
+            text="+",
+            bg=PANEL,
+            font_size=sp(30),
+            bold=True,
+            size_hint_x=None,
+            width=dp(64),
+        )
+        plus.bind(on_release=lambda *_a: self._step_target(+250))
+        brew = FlatButton(
+            text="BREW", bg=ACCENT, fg=(1, 1, 1, 1), font_size=sp(26), bold=True
+        )
+        brew.bind(on_release=lambda *_a: self._start_brew())
+        weigh = FlatButton(
+            text="WEIGH\nBEANS",
+            bg=PANEL,
+            fg=INK,
+            font_size=sp(18),
+            bold=True,
+            size_hint_x=None,
+            width=dp(140),
+            halign="center",
+        )
+        weigh.bind(on_release=lambda *_a: self.go("weigh"))
+        for w in (minus, self._dial_lbl, plus, brew, weigh):
+            self._idle_row.add_widget(w)
+
+    def _build_brewing_controls(self):
+        self._brewing_row = FlatButton(
+            text="MARK READY",
             bg=ACCENT,
             fg=(1, 1, 1, 1),
             font_size=sp(26),
             bold=True,
-            size_hint_y=None,
-            height=dp(96),
+            **self._full()
         )
-        self.action.bind(on_release=lambda *_a: self._action())
-        root.add_widget(self.action)
+        self._brewing_row.bind(on_release=lambda *_a: self._mark_ready())
 
-        self.add_widget(root)
-        self._pot = potstate.PotState("no_pot", "", 0.0, False)
-        self.tick()
+    def _build_ready_controls(self):
+        self._ready_row = FlatButton(
+            text="CLEAN UP",
+            bg=PANEL,
+            fg=INK,
+            font_size=sp(26),
+            bold=True,
+            **self._full()
+        )
+        self._ready_row.bind(on_release=lambda *_a: self._clean_up())
 
     def tick(self, *_a):
         """Poll the source, render, fire events."""
@@ -586,19 +645,12 @@ class HomeScreen(Screen):
         # responses.  Home only ticks while it is the visible screen.
         if self.manager is not None and self.manager.current != self.name:
             return
-        # Brew-complete target: full pot = capacity, half = capacity/2.  A
-        # brew that settles below target isn't declared done (no "fresh" from
-        # a dribble).
-        capacity = self.app.settings["pot_capacity_ml"]
-        target_g = capacity * (0.5 if self._half_pot else 1.0)
-        result = self.app.source.poll(target_g=target_g)
+        result = self.app.source.poll()
         pot = result.pot_state
 
-        # Dirtiness (the biohazard) is now decided by Brains and carried on
-        # the PotState (expired) -- it already survives dumping/rebrew and
-        # reboots, so no UI-side latch is needed.
         self._pot = pot
         self._render(pot)
+        self._show_controls_for(pot)
         # Live weight readout beside the status line: "settling" while moving,
         # else the raw grams (blank if we've no reading yet).
         if result.moving:
@@ -616,35 +668,63 @@ class HomeScreen(Screen):
             self.app.wake(pot)
         self._last_key = pot.key
 
-    def _toggle_pot_size(self):
-        self._half_pot = not self._half_pot
-        self.size_btn.text = "Half pot" if self._half_pot else "Full pot"
+    def _step_target(self, delta_ml):
+        cap = self.app.settings["pot_capacity_ml"]
+        self._target_ml = max(250, min(cap, self._target_ml + delta_ml))
+        self.app.settings["brew_target_ml"] = self._target_ml
+        self.app.settings.save()  # persist the dialed amount
+        self._refresh_dial()
+
+    def _refresh_dial(self):
+        self._dial_lbl.text = "{:.2f} L".format(self._target_ml / 1000.0)
+
+    def _start_brew(self):
+        # BREW: arm the state machine toward the dialed target (grams ~= mL).
+        self.app.source.start_brew(target_g=self._target_ml)
+        self.tick()
+
+    def _mark_ready(self):
+        # Manual brew-complete fallback.
+        event = self.app.source.mark_ready()
+        if event == "ready":
+            self.app.on_ready_event(self.app.source.poll())
+        self.tick()
+
+    def _clean_up(self):
+        # CLEAN UP: only meaningful once the pot is empty/absent (you can't
+        # wash a full pot).  Otherwise hint.
+        if self.app.mock:
+            self.app.source.advance()
+            self.tick()
+            return
+        if self._pot.key in ("empty", "no_pot"):
+            self.app.source.clean_up()
+            self.tick()
+        else:
+            self._flash("Empty the pot first")
 
     def _cycle(self):
         # --mock only: advance canned states.
         self.app.source.advance()
         self.tick()
 
-    def _action(self):
-        # While the biohazard is showing, the button is CLEAN; otherwise it
-        # opens the bean scale.
-        if self._pot.expired:
-            self._mark_cleaned()
-        else:
-            self.go("weigh")
-
-    def _mark_cleaned(self):
-        # CLEAN records that the pot was washed.  You can't wash a full pot,
-        # so require it be empty/absent first; otherwise hint.
-        if self.app.mock:
-            self.app.source.advance()
-            self.tick()
-            return
-        if self._pot.key in ("empty", "no_pot"):
-            self.app.source.clean()
-            self.tick()
-        else:
-            self._flash("Empty the pot first")
+    def _show_controls_for(self, pot):
+        # Swap the bottom control row to match the brew state.
+        brew_state = self.app.source_state()
+        rows = {
+            "idle": self._idle_row,
+            "brewing": self._brewing_row,
+            "ready": self._ready_row,
+        }
+        want = rows.get(brew_state, self._idle_row)
+        # stale (dirty) is a ready batch aged out -> still CLEAN UP.
+        if pot.expired:
+            want = self._ready_row
+        if self._controls.children[:1] != [want]:
+            self._controls.clear_widgets()
+            self._controls.add_widget(want)
+        if want is self._idle_row:
+            self._refresh_dial()
 
     def _flash(self, msg, seconds=2.0):
         # Briefly show a message on the status line, holding it against the
@@ -677,18 +757,8 @@ class HomeScreen(Screen):
             self.carafe.opacity = 1.0
             coffee = AMBER if pot.key == "aging" else GREEN
             self.carafe.set_state(pot.fill, coffee, expired)
-
-        # Bottom button: CLEAN while the biohazard shows, else WEIGH BEANS.
-        if expired:
-            self.action.text = "MARK CLEANED"
-            self.action._bg_rgba = HAZARD
-            self.action._bg_color.rgba = HAZARD
-            self.action.color = (0.1, 0.1, 0.1, 1)
-        else:
-            self.action.text = "WEIGH BEANS"
-            self.action._bg_rgba = ACCENT
-            self.action._bg_color.rgba = ACCENT
-            self.action.color = (1, 1, 1, 1)
+        # The bottom control row (BREW / MARK READY / CLEAN UP) is swapped by
+        # _show_controls_for(); nothing to do here.
 
 
 # --- Weigh ---------------------------------------------------------------
@@ -1135,6 +1205,13 @@ class BrewcopApp(App):
             return True
         self._reset_idle_timer()
         return False
+
+    def source_state(self):
+        # Brew state ("idle"/"brewing"/"ready") for choosing Home controls.
+        # Mock has no state machine -> treat as idle (controls still show, and
+        # the mock cycle strip drives the display).
+        brains = getattr(self.source, "_brains", None)
+        return brains.state if brains is not None else "idle"
 
     def _go(self, name):
         self.sm.transition.direction = "right" if name == "home" else "left"
