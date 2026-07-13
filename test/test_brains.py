@@ -11,11 +11,11 @@
 #############################################################
 
 """
-Tests for brains.Brains: the rate-based brew detector.
+Tests for brains.Brains: the explicit, user-driven brew state machine.
 
-Weight is fed as CONTENTS grams (net of pot tare); the scale/brewsource
-layer handles tare and reports a large-negative net when the pot is absent.
-Each test drives an injectable clock so rates are deterministic.
+Weight is fed as CONTENTS grams (net of pot tare).  Transitions are driven by
+start_brew / mark_ready / clean_up, plus weight reaching the target while
+brewing.  An injectable clock makes ages deterministic.
 """
 
 import os
@@ -40,265 +40,132 @@ class FakeClock:
 
 def make(empty_thresh=50):
     clk = FakeClock()
-    b = brains.Brains(empty_thresh=empty_thresh, now=clk)
-    return b, clk
-
-
-def feed(b, clk, net, dt=0.5):
-    """Advance the clock by dt and store one sample; return the event."""
-    clk.advance(dt)
-    return b.store(net)
+    return brains.Brains(empty_thresh=empty_thresh, now=clk), clk
 
 
 class TestBrains(unittest.TestCase):
-    def test_starts_unknown(self):
+    def test_starts_idle(self):
         b, _ = make()
-        self.assertEqual(b.state, "unknown")
+        self.assertEqual(b.state, "idle")
 
-    def test_empty_pot(self):
-        b, clk = make(empty_thresh=50)
-        for _ in range(5):
-            feed(b, clk, 10)
-        self.assertEqual(b.state, "empty")
-
-    def test_absent_pot_reads_empty(self):
-        # pot off the scale -> net is very negative -> "empty"
+    def test_brew_autocompletes_at_target(self):
         b, clk = make()
-        for _ in range(5):
-            feed(b, clk, -800)
-        self.assertEqual(b.state, "empty")
-
-    def _brew_to_full(self, b, clk, target=900, step=10):
-        # Gradual fill: step g per 0.5 s tick = 2*step g/s, within brew rate.
-        # Climbs past the empty threshold up to a realistic level.
-        net = 0
-        while net < target:
-            net += step
-            feed(b, clk, net)
-        return net
-
-    def _brew_and_settle(self, b, clk, target=900):
-        # Brew, then hold steady long enough for the rate window to drain so
-        # the state settles out of "brewing" (accept/reject fires here).
-        net = self._brew_to_full(b, clk, target=target)
-        for _ in range(int(brains.Brains.RATE_WINDOW_S / 0.5) + 3):
-            feed(b, clk, net)
-        return net
-
-    def test_gradual_fill_is_brewing(self):
-        b, clk = make()
-        self._brew_to_full(b, clk)
+        b.start_brew(target_g=1250)
         self.assertEqual(b.state, "brewing")
-
-    def test_brew_then_settle_emits_ready_and_sets_age(self):
-        b, clk = make()
-        net = self._brew_to_full(b, clk)
+        # partial fills stay brewing
+        self.assertIsNone(b.store(300))
         self.assertEqual(b.state, "brewing")
-        # stop rising: hold steady -> settles to ready, emits event
-        event = None
-        for _ in range(int(brains.Brains.RATE_WINDOW_S / 0.5) + 2):
-            e = feed(b, clk, net)
-            if e:
-                event = e
-        self.assertEqual(b.state, "ready")
+        self.assertIsNone(b.store(900))
+        self.assertEqual(b.state, "brewing")
+        # reaching target - margin completes
+        event = b.store(1250 - brains.Brains.BREW_TARGET_MARGIN_G)
         self.assertEqual(event, "ready")
-        # age starts near zero right after ready
-        self.assertLess(b.elapsed(), 5)
+        self.assertEqual(b.state, "ready")
+        self.assertIsNotNone(b.ready_time)
 
-    def test_step_placement_is_present_not_ready(self):
-        # a full pot set down in one step (hundreds of g in 0.5 s), with no
-        # prior brew observed -> "present" (age unknown), NEVER brewing, and
-        # NO "ready" event -- "ready"/fresh is only reachable via a brew.
+    def test_dribble_without_brew_does_nothing(self):
+        # weight appearing while IDLE is never a brew (no inference)
         b, clk = make()
-        feed(b, clk, 0)
-        event = feed(b, clk, 900)  # +900 g in one tick = 1800 g/s
-        self.assertEqual(b.state, "present")
-        self.assertIsNone(event)
+        for w in (100, 400, 900, 1200):
+            event = b.store(w)
+            self.assertIsNone(event)
+        self.assertEqual(b.state, "idle")
+
+    def test_mark_ready_manual_fallback(self):
+        b, clk = make()
+        b.start_brew(target_g=1250)
+        b.store(900)  # under target, still brewing
+        self.assertEqual(b.state, "brewing")
+        event = b.mark_ready()
+        self.assertEqual(event, "ready")
+        self.assertEqual(b.state, "ready")
+
+    def test_mark_ready_noop_when_not_brewing(self):
+        b, _ = make()
+        self.assertIsNone(b.mark_ready())  # idle
+        self.assertEqual(b.state, "idle")
+
+    def test_clean_up_returns_to_idle(self):
+        b, clk = make()
+        b.start_brew(target_g=1250)
+        b.store(1200)  # -> ready
+        self.assertEqual(b.state, "ready")
+        b.clean_up()
+        self.assertEqual(b.state, "idle")
         self.assertIsNone(b.ready_time)
 
-    def test_age_ticks_while_pot_absent(self):
-        # brew -> ready, then remove the pot; age must keep advancing so the
-        # pot reads its true age when it returns
+    def test_age_ticks_while_ready(self):
         b, clk = make()
-        net = self._brew_to_full(b, clk)
-        for _ in range(12):
-            feed(b, clk, net)  # settle -> ready
-        self.assertEqual(b.state, "ready")
-        ready_time = b.ready_time
-        # pot leaves for 30 minutes
-        for _ in range(5):
-            feed(b, clk, -800, dt=360)  # big time jumps, pot absent
-        self.assertEqual(b.state, "empty")
-        # pot returns (step) at a lower weight (some was poured)
-        feed(b, clk, 600)
-        self.assertEqual(b.state, "ready")
-        # SAME ready_time preserved -> age reflects the ~30 min absence
-        self.assertEqual(b.ready_time, ready_time)
-        self.assertGreater(b.elapsed(), 30 * 60)
+        b.start_brew(target_g=1250)
+        b.store(1200)  # ready
+        clk.advance(42)
+        self.assertAlmostEqual(b.elapsed(), 42)
 
-    def test_return_does_not_emit_ready(self):
-        # returning the pot must NOT fire a notification (only a real brew does)
+    def test_age_persists_while_pot_absent(self):
+        # ready pot carried away (net drops) keeps its age; state stays ready
+        # (user-driven -- removal is not a transition)
         b, clk = make()
-        # establish a ready pot via a brew
-        net = self._brew_to_full(b, clk)
-        for _ in range(12):
-            feed(b, clk, net)
-        # remove and return
-        for _ in range(3):
-            feed(b, clk, -800, dt=120)
-        event = feed(b, clk, 700)  # step return
+        b.start_brew(target_g=1250)
+        b.store(1200)  # ready
+        rt = b.ready_time
+        clk.advance(1800)
+        b.store(-800)  # pot off the scale
+        self.assertEqual(b.state, "ready")
+        self.assertEqual(b.ready_time, rt)
+        self.assertGreaterEqual(b.elapsed(), 1800)
+
+    def test_is_stale(self):
+        b, clk = make()
+        b.start_brew(target_g=1250)
+        b.store(1200)  # ready
+        stale = 4 * 3600
+        self.assertFalse(b.is_stale(stale))
+        clk.advance(stale + 10)
+        self.assertTrue(b.is_stale(stale))
+
+    def test_is_stale_only_when_ready(self):
+        b, clk = make()
+        stale = 4 * 3600
+        self.assertFalse(b.is_stale(stale))  # idle
+        b.start_brew(target_g=1250)
+        clk.advance(stale + 10)
+        self.assertFalse(b.is_stale(stale))  # brewing, not ready
+
+    def test_no_notify_on_placement_while_idle(self):
+        # a full pot set down while idle does not fire "ready"
+        b, clk = make()
+        event = b.store(1300)
         self.assertIsNone(event)
+        self.assertEqual(b.state, "idle")
 
-    def test_startup_with_coffee_is_present_age_unknown(self):
-        # a pot with coffee already present at first sight (cold start): we
-        # never watched it brew, so age is unknown -> "present", no event,
-        # no ready_time (do NOT claim it's fresh)
+
+class TestPersistence(unittest.TestCase):
+    def test_snapshot_restore_preserves_ready_age(self):
         b, clk = make()
-        event = feed(b, clk, 800)
-        self.assertEqual(b.state, "present")
-        self.assertIsNone(event)
-        self.assertIsNone(b.ready_time)
-
-    def test_return_after_brew_shows_ready_not_present(self):
-        # once a brew has been observed, a step return keeps "ready" (with the
-        # preserved age), NOT "present" -- we know this coffee's age
-        b, clk = make()
-        net = self._brew_to_full(b, clk)
-        for _ in range(12):
-            feed(b, clk, net)  # settle -> ready
-        self.assertEqual(b.state, "ready")
-        for _ in range(3):
-            feed(b, clk, -800, dt=120)  # pot away
-        feed(b, clk, 700)  # step return
-        self.assertEqual(b.state, "ready")
-
-    # --- dirty-pot / clean-button behavior --------------------------------
-    STALE = 4 * 3600
-
-    def test_fresh_brew_becomes_dirty_when_stale(self):
-        b, clk = make()
-        net = self._brew_to_full(b, clk)
-        for _ in range(12):
-            feed(b, clk, net)
-        self.assertFalse(b.is_dirty(self.STALE))
-        clk.advance(self.STALE + 10)
-        b.store(net)
-        self.assertTrue(b.is_dirty(self.STALE))
-
-    def test_rebrew_into_dirty_pot_rejected_stays_dirty(self):
-        b, clk = make()
-        net = self._brew_to_full(b, clk)
-        for _ in range(12):
-            feed(b, clk, net)
-        rt1 = b.ready_time
-        clk.advance(self.STALE + 10)
-        b.store(net)  # now dirty
-        # dump, then rebrew without cleaning
-        feed(b, clk, -800)
-        self._brew_and_settle(b, clk)
-        self.assertEqual(b.ready_time, rt1)  # NOT reset -> stays dirty
-        self.assertTrue(b.is_dirty(self.STALE))
-
-    def test_dribble_below_target_not_ready(self):
-        # a small gradual addition that settles well below target must NOT be
-        # declared a completed brew (no ready, no event)
-        b, clk = make()
-        net = 0
-        for _ in range(20):  # rises to ~200 g, then settle
-            net += 10
-            clk.advance(0.5)
-            event = b.store(net, target_g=1250)
-        for _ in range(int(brains.Brains.RATE_WINDOW_S / 0.5) + 3):
-            clk.advance(0.5)
-            e = b.store(net, target_g=1250)
-            event = e or event
-        self.assertNotEqual(b.state, "ready")
-        self.assertIsNone(b.ready_time)
-
-    def test_full_brew_reaches_target_is_ready(self):
-        b, clk = make()
-        net = 0
-        while net < 1200:  # gradual fill past target-margin (1250-150=1100)
-            net += 10
-            clk.advance(0.5)
-            b.store(net, target_g=1250)
-        event = None
-        for _ in range(int(brains.Brains.RATE_WINDOW_S / 0.5) + 3):
-            clk.advance(0.5)
-            e = b.store(net, target_g=1250)
-            event = e or event
-        self.assertEqual(b.state, "ready")
-        self.assertEqual(event, "ready")
-
-    def test_half_pot_target_accepts_half(self):
-        # with a half-pot target, ~625 g counts as a completed brew
-        b, clk = make()
-        net = 0
-        while net < 650:
-            net += 10
-            clk.advance(0.5)
-            b.store(net, target_g=625)
-        event = None
-        for _ in range(int(brains.Brains.RATE_WINDOW_S / 0.5) + 3):
-            clk.advance(0.5)
-            e = b.store(net, target_g=625)
-            event = e or event
-        self.assertEqual(b.state, "ready")
-        self.assertEqual(event, "ready")
-
-    def test_clean_clears_dirty(self):
-        b, clk = make()
-        net = self._brew_to_full(b, clk)
-        for _ in range(12):
-            feed(b, clk, net)
-        clk.advance(self.STALE + 10)
-        b.store(net)
-        self.assertTrue(b.is_dirty(self.STALE))
-        b.clean()
-        self.assertFalse(b.is_dirty(self.STALE))
-
-    def test_proactive_clean_before_stale_never_dirty(self):
-        b, clk = make()
-        net = self._brew_to_full(b, clk)
-        for _ in range(12):
-            feed(b, clk, net)
-        feed(b, clk, -800, dt=600)  # dump while fresh
-        b.clean()  # wash
-        self.assertFalse(b.is_dirty(self.STALE))
-
-    def test_dirty_survives_dump_until_clean(self):
-        b, clk = make()
-        net = self._brew_to_full(b, clk)
-        for _ in range(12):
-            feed(b, clk, net)
-        clk.advance(self.STALE + 10)
-        b.store(net)
-        feed(b, clk, -800)  # dump the stale coffee (no clean)
-        self.assertTrue(b.is_dirty(self.STALE))  # still dirty
-        b.clean()
-        self.assertFalse(b.is_dirty(self.STALE))
-
-    def test_snapshot_restore_preserves_age(self):
-        # brew -> ready, snapshot; a fresh Brains that restores it reports the
-        # same coffee age (ready_time is absolute, so it survives a "reboot")
-        b, clk = make()
-        net = self._brew_to_full(b, clk)
-        for _ in range(12):
-            feed(b, clk, net)
-        self.assertEqual(b.state, "ready")
+        b.start_brew(target_g=1250)
+        b.store(1200)  # ready
         snap = b.snapshot()
-
-        clk.advance(3600)  # an hour passes (incl. any downtime)
+        clk.advance(3600)  # an hour (incl. any downtime)
         b2 = brains.Brains(empty_thresh=50, now=clk)
         b2.restore(snap)
         self.assertEqual(b2.state, "ready")
-        # age reflects the original ready_time -> ~1 h, not zero
         self.assertGreater(b2.elapsed(), 3600 - 5)
+
+    def test_snapshot_restore_resumes_brewing(self):
+        b, clk = make()
+        b.start_brew(target_g=1250)
+        snap = b.snapshot()
+        b2 = brains.Brains(empty_thresh=50, now=clk)
+        b2.restore(snap)
+        self.assertEqual(b2.state, "brewing")
+        self.assertEqual(b2.target_g, 1250)
+        # still completes at target after restore
+        self.assertEqual(b2.store(1200), "ready")
 
     def test_restore_none_is_noop(self):
         b, _ = make()
-        b.restore(None)  # must not raise
-        self.assertEqual(b.state, "unknown")
+        b.restore(None)
+        self.assertEqual(b.state, "idle")
 
 
 if __name__ == "__main__":
