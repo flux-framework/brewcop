@@ -7,10 +7,15 @@ behavior. Use it to check the current code from time to time.
 user declares intent. The brew state machine (`brains.py`) is:
 
 ```
-idle ── BREW (dial amount) ──▶ brewing ──[level reaches target | MARK READY]──▶ ready
-  ▲                                                                              │
-  └───────────────────────────── CLEAN UP ──────────────────────────────────────┘
+idle ── BREW ──▶ brewing ──[fill reaches the target line]──▶ ready
+  ▲                                                             │
+  └──────────────────── CLEAN UP ───────────────────────────────┘
 ```
+
+The brew amount is set by dragging a dotted target line on the carafe (the
+finished-pot level).  Actions live in a fixed right-hand rail (BREW / CLEAN /
+WEIGH) present on every screen; buttons enable/disable by state but never
+move (BREW only when idle, CLEAN only when ready, WEIGH always).
 
 Age = wall-clock since the batch reached ready (ticks even while the pot is
 carried around). Biohazard = a ready batch aged past the stale timeout.
@@ -29,21 +34,21 @@ Status: ✅ implemented & unit-tested · 🟡 implemented, needs on-panel check 
 ## A. Brewing (explicit)
 
 **A1. Start a brew.** 🟡
-Dial the finished-pot level ([- L +] on the RHS stack, persists across
-reboots), press **BREW**.
-→ state `brewing`; carafe fills toward the dialed target as coffee drips in.
+Drag the dotted target line on the carafe to the finished-pot level (persists
+across reboots), press **BREW** on the rail.
+→ state `brewing`; carafe fills toward the target line as coffee drips in.
 
-**A2. Brew completes at the dialed level.** 🟡
-While brewing, contents reach the dialed target (which IS the finished-pot
-level, so it's an exact match within scale noise ±POT_TOLERANCE_G — no
-absorption margin, no fudge constant).
+**A2. Brew completes at the target line.** 🟡
+While brewing, contents reach the target-line level (which IS the
+finished-pot level, so it's an exact match within scale noise
+±POT_TOLERANCE_G — no absorption margin, no fudge constant).
 → `ready`; `ready_time` set; Slack "ready" fires (if enabled).
 
-**A3. Brew stalls short → dial down to complete.** ✅
-Grounds absorbed more than expected; the level plateaus below the dial.
-→ stays `brewing`; user dials the target DOWN to the level actually reached
-→ completes to `ready`. No separate button; the dial is the only control,
-and it self-calibrates (the dial persists) over a few brews.
+**A3. Brew stalls short → drag the line down to complete.** ✅🟡
+Grounds absorbed more than expected; the level plateaus below the target line.
+→ stays `brewing`; user drags the target line DOWN to the level actually
+reached → fill meets line → completes to `ready`. No separate button, and it
+self-calibrates (the line position persists) over a few brews.
 
 **A4. A dribble / small addition while idle.** ✅
 Weight rises a little with no BREW pressed.
@@ -105,10 +110,9 @@ notification. Reaching fresh/stale requires an explicit BREW.
 ## E. Weigh mode (beans)
 
 **E1. Weigh beans.** 🟡
-IDLE shows a WEIGH BEANS button (alongside the mL dial + BREW). Enter it;
-place beans.
+Press **WEIGH** on the rail (available on every screen); place beans.
 → live raw weight, g/oz toggle, TARE zeroes; dosing hint for the configured
-pot capacity (SCA 1:18 anchor).
+pot capacity (SCA 1:18 anchor); Back returns to Home.
 
 **E2. Dosing hint tracks configured capacity.** ✅
 Change Pot capacity in Settings, return to Weigh → hint recomputes.
@@ -144,7 +148,7 @@ storm is structurally impossible now, not just tuned away.
 
 - **❓ Default full-pot level.** `brew_target_ml` defaults to
   `pot_capacity_ml` (1250). The true finished level of a "full" brew is a bit
-  less (grounds retain water); the dial self-calibrates in use (A3), but a
-  better default could be set from a real brew.
+  less (grounds retain water); the target line self-calibrates in use (A3),
+  but a better default could be set from a real brew.
 - **❓ Enable Slack.** Now that ready is gated by explicit BREW, it may be
   safe to default `slack_enabled` on — decide after on-machine confirmation.
