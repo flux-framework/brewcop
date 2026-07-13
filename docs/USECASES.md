@@ -29,18 +29,21 @@ Status: ✅ implemented & unit-tested · 🟡 implemented, needs on-panel check 
 ## A. Brewing (explicit)
 
 **A1. Start a brew.** 🟡
-Dial the water amount ([- mL +], persists across reboots), press **BREW**.
+Dial the finished-pot level ([- L +] on the RHS stack, persists across
+reboots), press **BREW**.
 → state `brewing`; carafe fills toward the dialed target as coffee drips in.
 
-**A2. Brew auto-completes at target.** 🟡⚠️
-While brewing, contents reach `target − BREW_TARGET_MARGIN_G`.
-→ `ready`; `ready_time` set; Slack "ready" fires (if enabled). Margin (⚠️
-provisional 150 g) must cover water the grounds absorb; tune with a trace.
+**A2. Brew completes at the dialed level.** 🟡
+While brewing, contents reach the dialed target (which IS the finished-pot
+level, so it's an exact match within scale noise ±POT_TOLERANCE_G — no
+absorption margin, no fudge constant).
+→ `ready`; `ready_time` set; Slack "ready" fires (if enabled).
 
-**A3. Brew never quite reaches target (manual fallback).** ✅
-Grounds absorbed more than the margin; weight plateaus below target.
-→ stays `brewing`; user presses **MARK READY** → `ready`. Covers a bad
-margin without dumping the coffee.
+**A3. Brew stalls short → dial down to complete.** ✅
+Grounds absorbed more than expected; the level plateaus below the dial.
+→ stays `brewing`; user dials the target DOWN to the level actually reached
+→ completes to `ready`. No separate button; the dial is the only control,
+and it self-calibrates (the dial persists) over a few brews.
 
 **A4. A dribble / small addition while idle.** ✅
 Weight rises a little with no BREW pressed.
@@ -139,8 +142,9 @@ storm is structurally impossible now, not just tuned away.
 
 ## Open questions
 
-- **❓ Brew-complete margin (A2).** `BREW_TARGET_MARGIN_G` is a guess; confirm
-  against a captured brew trace (`scale_probe.py`). MARK READY (A3) is the
-  safety net until then.
+- **❓ Default full-pot level.** `brew_target_ml` defaults to
+  `pot_capacity_ml` (1250). The true finished level of a "full" brew is a bit
+  less (grounds retain water); the dial self-calibrates in use (A3), but a
+  better default could be set from a real brew.
 - **❓ Enable Slack.** Now that ready is gated by explicit BREW, it may be
   safe to default `slack_enabled` on — decide after on-machine confirmation.
