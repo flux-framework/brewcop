@@ -483,15 +483,20 @@ class CarafeWidget(Widget):
                     radius=[dp(3)],
                 )
 
-        # Target label above the left end of the line (outside canvas ctx),
-        # in the open area past the pot.
+        # Target label in the open area LEFT of the carafe, vertically centered
+        # on the line's grab handle.  Right-aligned so its right edge sits just
+        # left of the grabber, extending leftward into the margin (never over
+        # the pot body).  Two lines keep it narrow enough for the gutter.
         if self._line_visible and not self._expired and self._body:
             ly_line = by + inset + fill_max * self._target_frac
             ml = self._target_frac * self._capacity_ml
-            self._label.text = "extraction {:.0f} mL".format(ml)
-            self._label.halign = "left"
-            self._label.size = (dp(130), dp(20))
-            self._label.pos = (x + dp(10), ly_line + dp(8))
+            self._label.text = "extraction\n{:.0f} mL".format(ml)
+            self._label.halign = "right"
+            self._label.valign = "middle"
+            lw, lh = dp(100), dp(48)
+            self._label.size = (lw, lh)
+            # right edge a bit left of the grabber; y centered on the line
+            self._label.pos = (x + dp(14) - lw, ly_line - lh / 2)
             self._label.opacity = 1
         else:
             self._label.opacity = 0
