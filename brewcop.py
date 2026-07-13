@@ -18,15 +18,17 @@ Avery Berkel scale, interprets weight as brew activity, and shows a live
 carafe (level + freshness, with a blinking biohazard for a stale pot).
 
 Brewing is explicit, user-driven (no weight inference): the user dials the
-water amount and presses BREW; the scale watches the level climb to target
-(or the user presses MARK READY); the batch ages until CLEAN UP.
+finished-pot level and presses BREW; the scale watches the level climb until
+it reaches that target; the batch ages until CLEAN UP.  If a brew stalls
+short, the user dials the target down to the level reached (dial-to-complete)
+-- so there is no separate "mark ready" button.
 
 Screens (three total):
-  Home     -- Flux mark + wordmark, the live carafe, a pot-status line, and a
-              state-driven control row:
-                idle    -> [- mL +]  BREW   WEIGH BEANS
-                brewing -> MARK READY  (manual fallback)
-                ready   -> CLEAN UP    (and biohazard once stale)
+  Home     -- Flux mark + wordmark, the live carafe (left), and a contextual
+              vertical action stack (right):
+                idle    -> [- L +] dial, BREW, WEIGH BEANS
+                brewing -> WEIGH BEANS   (brew completes by weight)
+                ready   -> CLEAN UP, WEIGH BEANS   (+ biohazard once stale)
   Weigh    -- live scale weight, g/oz units toggle, tare, dosing hint.
   Settings -- Slack on/off + steppers for tunable parameters (usersettings).
 
@@ -490,13 +492,16 @@ class HomeScreen(Screen):
         top.add_widget(gear)
         root.add_widget(top)
 
-        # carafe centerpiece (tap anywhere on it to cycle faked states)
+        # Body: carafe centerpiece on the left, a vertical action stack on the
+        # right.  The stack is contextual -- only valid actions for the current
+        # brew state appear.
+        body = BoxLayout(orientation="horizontal", spacing=dp(16))
+
         center = FloatLayout()
         self.carafe = CarafeWidget(size_hint=(None, None))
 
         def _place_carafe(*_a):
-            # square-ish, centered, sized to the available center area
-            side = min(center.width * 0.6, center.height * 0.82)
+            side = min(center.width * 0.78, center.height * 0.82)
             self.carafe.size = (side, side * 1.05)
             self.carafe.pos = (
                 center.x + (center.width - self.carafe.width) / 2,
@@ -505,11 +510,21 @@ class HomeScreen(Screen):
 
         center.bind(pos=_place_carafe, size=_place_carafe)
         center.add_widget(self.carafe)
-        root.add_widget(center)
+        body.add_widget(center)
 
-        # Status row: pot-status centered across the full width, with a live
-        # raw-weight readout floated to the right (swaps to "settling" while
-        # the scale is in motion).
+        # Right-hand action stack (fixed width column).
+        self._stack = BoxLayout(
+            orientation="vertical",
+            spacing=dp(12),
+            size_hint_x=None,
+            width=dp(190),
+        )
+        self._build_actions()
+        body.add_widget(self._stack)
+        root.add_widget(body)
+
+        # Status row (full width, below the body): pot-status centered, live
+        # raw-weight readout to the right (swaps to "settling" while moving).
         statusbar = FloatLayout(size_hint_y=None, height=dp(40))
         self.status = Label(
             text="",
@@ -549,99 +564,66 @@ class HomeScreen(Screen):
             cycle.bind(on_release=lambda *_a: self._cycle())
             root.add_widget(cycle)
 
-        # State-driven control area at the bottom.  Exactly one of three rows
-        # is shown depending on the brew state:
-        #   idle    -> [- mL +]  BREW   WEIGH BEANS
-        #   brewing -> MARK READY  (manual fallback if the target is missed)
-        #   ready   -> CLEAN UP    (also the CLEAN-when-stale action)
-        self._controls = FloatLayout(size_hint_y=None, height=dp(96))
-        self._build_idle_controls()
-        self._build_brewing_controls()
-        self._build_ready_controls()
-        root.add_widget(self._controls)
-
         self.add_widget(root)
         self._pot = potstate.PotState("no_pot", "", 0.0, False)
         # Seed the dialed target from the persisted setting.
         self._target_ml = self.app.settings["brew_target_ml"]
         self.tick()
 
-    def _full(self):
-        # Fill a control row across the whole control area.
-        return {"size": (1, 1), "pos_hint": {"x": 0, "y": 0}}
+    def _build_actions(self):
+        """Build the reusable RHS action widgets (shown contextually)."""
+        self._brew_btn = FlatButton(
+            text="BREW", bg=ACCENT, fg=(1, 1, 1, 1), font_size=sp(26), bold=True
+        )
+        self._brew_btn.bind(on_release=lambda *_a: self._start_brew())
 
-    def _build_idle_controls(self):
-        self._idle_row = BoxLayout(
-            orientation="horizontal", spacing=dp(12), **self._full()
-        )
-        minus = FlatButton(
-            text="-",
-            bg=PANEL,
-            font_size=sp(30),
+        self._clean_btn = FlatButton(
+            text="CLEAN UP",
+            bg=HAZARD,
+            fg=(0.1, 0.1, 0.1, 1),
+            font_size=sp(24),
             bold=True,
-            size_hint_x=None,
-            width=dp(64),
         )
-        minus.bind(on_release=lambda *_a: self._step_target(-250))
+        self._clean_btn.bind(on_release=lambda *_a: self._clean_up())
+
+        self._weigh_btn = FlatButton(
+            text="WEIGH\nBEANS",
+            bg=PANEL,
+            fg=INK,
+            font_size=sp(20),
+            bold=True,
+            halign="center",
+            size_hint_y=None,
+            height=dp(80),
+        )
+        self._weigh_btn.bind(on_release=lambda *_a: self.go("weigh"))
+
+        # Compact mL dial (idle only), stacked: label over [- +] row.
+        self._dial_box = BoxLayout(
+            orientation="vertical", size_hint_y=None, height=dp(76), spacing=dp(4)
+        )
         self._dial_lbl = Label(
             text="",
             color=INK,
-            font_size=sp(20),
+            font_size=sp(18),
             bold=True,
-            size_hint_x=None,
-            width=dp(150),
+            size_hint_y=None,
+            height=dp(28),
             halign="center",
             valign="middle",
         )
         self._dial_lbl.bind(size=lambda w, s: setattr(w, "text_size", s))
-        plus = FlatButton(
-            text="+",
-            bg=PANEL,
-            font_size=sp(30),
-            bold=True,
-            size_hint_x=None,
-            width=dp(64),
-        )
+        dial_row = BoxLayout(orientation="horizontal", spacing=dp(8))
+        minus = FlatButton(text="-", bg=PANEL, font_size=sp(26), bold=True)
+        minus.bind(on_release=lambda *_a: self._step_target(-250))
+        plus = FlatButton(text="+", bg=PANEL, font_size=sp(26), bold=True)
         plus.bind(on_release=lambda *_a: self._step_target(+250))
-        brew = FlatButton(
-            text="BREW", bg=ACCENT, fg=(1, 1, 1, 1), font_size=sp(26), bold=True
-        )
-        brew.bind(on_release=lambda *_a: self._start_brew())
-        weigh = FlatButton(
-            text="WEIGH\nBEANS",
-            bg=PANEL,
-            fg=INK,
-            font_size=sp(18),
-            bold=True,
-            size_hint_x=None,
-            width=dp(140),
-            halign="center",
-        )
-        weigh.bind(on_release=lambda *_a: self.go("weigh"))
-        for w in (minus, self._dial_lbl, plus, brew, weigh):
-            self._idle_row.add_widget(w)
+        dial_row.add_widget(minus)
+        dial_row.add_widget(plus)
+        self._dial_box.add_widget(self._dial_lbl)
+        self._dial_box.add_widget(dial_row)
 
-    def _build_brewing_controls(self):
-        self._brewing_row = FlatButton(
-            text="MARK READY",
-            bg=ACCENT,
-            fg=(1, 1, 1, 1),
-            font_size=sp(26),
-            bold=True,
-            **self._full()
-        )
-        self._brewing_row.bind(on_release=lambda *_a: self._mark_ready())
-
-    def _build_ready_controls(self):
-        self._ready_row = FlatButton(
-            text="CLEAN UP",
-            bg=PANEL,
-            fg=INK,
-            font_size=sp(26),
-            bold=True,
-            **self._full()
-        )
-        self._ready_row.bind(on_release=lambda *_a: self._clean_up())
+        self._stack_shown = None  # which contextual layout is up
 
     def tick(self, *_a):
         """Poll the source, render, fire events."""
@@ -688,13 +670,6 @@ class HomeScreen(Screen):
         self.app.source.start_brew(target_g=self._target_ml)
         self.tick()
 
-    def _mark_ready(self):
-        # Manual brew-complete fallback.
-        event = self.app.source.mark_ready()
-        if event == "ready":
-            self.app.on_ready_event(self.app.source.poll())
-        self.tick()
-
     def _clean_up(self):
         # CLEAN UP: only meaningful once the pot is empty/absent (you can't
         # wash a full pot).  Otherwise hint.
@@ -714,21 +689,31 @@ class HomeScreen(Screen):
         self.tick()
 
     def _show_controls_for(self, pot):
-        # Swap the bottom control row to match the brew state.
+        # Populate the RHS stack with the actions valid for this state:
+        #   idle    -> dial, BREW, WEIGH
+        #   brewing -> WEIGH   (brew completes by weight; nothing else to press)
+        #   ready   -> CLEAN UP, WEIGH   (CLEAN UP also handles the stale/dirty
+        #              case, since stale is just a ready batch aged out)
         brew_state = self.app.source_state()
-        rows = {
-            "idle": self._idle_row,
-            "brewing": self._brewing_row,
-            "ready": self._ready_row,
-        }
-        want = rows.get(brew_state, self._idle_row)
-        # stale (dirty) is a ready batch aged out -> still CLEAN UP.
         if pot.expired:
-            want = self._ready_row
-        if self._controls.children[:1] != [want]:
-            self._controls.clear_widgets()
-            self._controls.add_widget(want)
-        if want is self._idle_row:
+            brew_state = "ready"
+        if brew_state == self._stack_shown:
+            if brew_state == "idle":
+                self._refresh_dial()
+            return
+        self._stack_shown = brew_state
+
+        self._stack.clear_widgets()
+        if brew_state == "brewing":
+            self._stack.add_widget(Widget())  # push WEIGH to the bottom
+            self._stack.add_widget(self._weigh_btn)
+        elif brew_state == "ready":
+            self._stack.add_widget(self._clean_btn)
+            self._stack.add_widget(self._weigh_btn)
+        else:  # idle
+            self._stack.add_widget(self._dial_box)
+            self._stack.add_widget(self._brew_btn)
+            self._stack.add_widget(self._weigh_btn)
             self._refresh_dial()
 
     def _flash(self, msg, seconds=2.0):
