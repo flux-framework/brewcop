@@ -1150,16 +1150,11 @@ class BrewcopApp(App):
             Window.bind(on_key_down=self._on_key_down)
             Window.bind(on_touch_down=self._on_touch)
 
-        self.sm = ScreenManager(transition=SlideTransition(duration=0.2))
-        go = self._go
-        self.home = HomeScreen(go, self, name="home")
-        self.sm.add_widget(self.home)
-        self.sm.add_widget(WeighScreen(go, self, name="weigh"))
-        self.sm.add_widget(SettingsScreen(go, self.settings, name="settings"))
-
         # Fixed action rail (BREW / CLEAN / WEIGH), present on every screen.
         # Buttons enable/disable by brew state; the layout never moves, so the
-        # verbs are always in the same place (spatial muscle memory).
+        # verbs are always in the same place (spatial muscle memory).  Built
+        # BEFORE the screens because HomeScreen's first tick() calls
+        # refresh_rail(), which touches these buttons.
         rail = BoxLayout(
             orientation="vertical",
             spacing=dp(12),
@@ -1191,6 +1186,14 @@ class BrewcopApp(App):
         self._weigh_btn.bind(on_release=lambda *_a: self._go("weigh"))
         for b in (self._brew_btn, self._clean_btn, self._weigh_btn):
             rail.add_widget(b)
+
+        # Screens (HomeScreen.tick() -> refresh_rail() needs the buttons above).
+        self.sm = ScreenManager(transition=SlideTransition(duration=0.2))
+        go = self._go
+        self.home = HomeScreen(go, self, name="home")
+        self.sm.add_widget(self.home)
+        self.sm.add_widget(WeighScreen(go, self, name="weigh"))
+        self.sm.add_widget(SettingsScreen(go, self.settings, name="settings"))
 
         outer = BoxLayout(orientation="horizontal")
         outer.add_widget(self.sm)
