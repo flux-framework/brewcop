@@ -117,12 +117,6 @@ class ScaleBrewSource:
         self._brains.start_brew(target_g)
         self._maybe_persist()
 
-    def mark_ready(self):
-        """Manual brew-complete fallback.  Returns "ready" if it fired."""
-        event = self._brains.mark_ready()
-        self._maybe_persist()
-        return event
-
     def clean_up(self):
         """CLEAN UP pressed: batch dealt with, return to idle."""
         self._brains.clean_up()
@@ -162,9 +156,6 @@ class MockBrewSource:
     # Transition methods are no-ops in mock (states are canned + cycled).
     def start_brew(self, target_g):
         pass
-
-    def mark_ready(self):
-        return None
 
     def clean_up(self):
         pass

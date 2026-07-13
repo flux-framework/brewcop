@@ -131,28 +131,21 @@ class TestScaleBrewSource(unittest.TestCase):
         self.assertEqual(src.poll().pot_state.key, "present")
 
     def test_brew_cycle(self):
-        # start_brew -> filling stays "brewing" -> reaching target emits ready
+        # start_brew -> filling stays "brewing" -> reaching the dialed target
+        # level emits ready
         sc = ScriptedScale([(795 + 300, True), (795 + 1200, True)])
         src = brewsource.ScaleBrewSource(sc, SETTINGS)
-        src.start_brew(target_g=1250)
+        src.start_brew(target_g=1200)  # finished-pot level
         r1 = src.poll()  # 300 g contents, under target
         self.assertEqual(r1.pot_state.key, "brewing")
         self.assertIsNone(r1.event)
-        r2 = src.poll()  # 1200 g contents, past target - margin
+        r2 = src.poll()  # 1200 g contents == target
         self.assertEqual(r2.event, "ready")
         self.assertIn(r2.pot_state.key, ("fresh", "aging"))
         # clean up -> back to idle; a full pot now reads "present"
         src.clean_up()
         r3 = src.poll()
         self.assertEqual(r3.pot_state.key, "present")
-
-    def test_mark_ready_fallback(self):
-        sc = ScriptedScale([(795 + 800, True)] * 3)
-        src = brewsource.ScaleBrewSource(sc, SETTINGS)
-        src.start_brew(target_g=1250)
-        self.assertEqual(src.poll().pot_state.key, "brewing")  # under target
-        self.assertEqual(src.mark_ready(), "ready")  # manual completion
-        self.assertIn(src.poll().pot_state.key, ("fresh", "aging"))
 
     def test_restores_persisted_ready_state(self):
         # A saved "ready" snapshot from a prior run is restored on init, so a
