@@ -483,20 +483,23 @@ class CarafeWidget(Widget):
                     radius=[dp(3)],
                 )
 
-        # Target label in the open area LEFT of the carafe, vertically centered
-        # on the line's grab handle.  Right-aligned so its right edge sits just
-        # left of the grabber, extending leftward into the margin (never over
-        # the pot body).  Two lines keep it narrow enough for the gutter.
+        # Target label sits ABOVE the grab handle (in the open area left of the
+        # carafe), not beside it -- so a fingertip on the grabber while dragging
+        # never covers the reading.  Centered over the grabber, clamped so it
+        # can't run off the left screen edge, and always clear of the pot body.
         if self._line_visible and not self._expired and self._body:
             ly_line = by + inset + fill_max * self._target_frac
             ml = self._target_frac * self._capacity_ml
             self._label.text = "extraction\n{:.0f} mL".format(ml)
-            self._label.halign = "right"
+            self._label.halign = "center"
             self._label.valign = "middle"
             lw, lh = dp(100), dp(48)
             self._label.size = (lw, lh)
-            # right edge a bit left of the grabber; y centered on the line
-            self._label.pos = (x + dp(14) - lw, ly_line - lh / 2)
+            x_grab = x + dp(18)  # matches the grab-handle center above
+            hs = dp(16)
+            lx = max(dp(4), x_grab - lw / 2)
+            # bottom of the label a small gap above the grabber's top edge
+            self._label.pos = (lx, ly_line + hs / 2 + dp(10))
             self._label.opacity = 1
         else:
             self._label.opacity = 0
@@ -800,10 +803,17 @@ class HomeScreen(Screen):
 
         # Always draw the carafe (even with no pot on the scale it shows as an
         # empty carafe -- the fixed frame the target line and fill relate to).
-        # Show the age clock inside the body while the coffee is fresh/aging.
+        # Show a labeled age clock inside the body while fresh/aging:
+        # "Fresh Coffee" / "Aging" over the elapsed time.  (Biohazard takes
+        # over once stale; idle/present/empty show nothing.)
         self.carafe.opacity = 1.0
         coffee = AMBER if pot.key == "aging" else GREEN
-        age_text = pot.age if pot.key in ("fresh", "aging") else ""
+        if pot.key == "fresh":
+            age_text = "Fresh Coffee\n{}".format(pot.age)
+        elif pot.key == "aging":
+            age_text = "Aging\n{}".format(pot.age)
+        else:
+            age_text = ""
         self.carafe.set_state(pot.fill, coffee, expired, age_text=age_text)
         # Actions live in the app-level rail (BREW / CLEAN / WEIGH), enabled
         # per state by App.refresh_rail(); nothing to do here.
