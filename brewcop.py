@@ -740,6 +740,15 @@ class HomeScreen(Screen):
         self._target_ml = ml
         self.app.settings["brew_target_ml"] = ml
         self.app.settings.save()
+        # While BREWING, the line IS the finished-pot level, so moving it
+        # re-arms the target (use case A3: a stalled brew completes when you
+        # drag the line down to the level actually reached).  Re-arm brains and
+        # tick so the next poll can complete to ready.  Idle just sets the
+        # amount for the next BREW; a ready batch is left alone (re-arming would
+        # discard it).
+        if self.app.source_state() == "brewing":
+            self.app.source.start_brew(target_g=ml)
+            self.tick()
 
     def tick(self, *_a):
         """Poll the source, render, fire events."""
