@@ -191,6 +191,27 @@ class CarafeWidget(Widget):
         self._expired = False
         self._blink_on = True
         self._blink_ev = None
+        # Draggable brew-target line: a dotted line across the body at the
+        # target fill fraction, labeled in litres.  Shown when the app enables
+        # it (idle/brewing).  Dragging it sets the target; on_target(ml) is
+        # called back so the app can persist and act on it.
+        self._target_frac = 1.0  # 0..1 of the fillable body height
+        self._line_visible = False
+        self._dragging = False
+        self._capacity_ml = 1250  # for labeling the line (frac -> litres)
+        self.on_target = None  # callback(ml)
+        self._body = None  # geometry cached by _redraw for touch mapping
+        self._label = Label(
+            text="",
+            font_size=sp(15),
+            bold=True,
+            color=INK,
+            size_hint=(None, None),
+            halign="right",
+            valign="middle",
+        )
+        self._label.bind(size=lambda w, s: setattr(w, "text_size", s))
+        self.add_widget(self._label)
         # Load the biohazard PNG once; tolerate it being absent (fall back to
         # no image -- the caption still conveys the warning).
         try:
@@ -206,6 +227,67 @@ class CarafeWidget(Widget):
         self._expired = expired
         show_hazard = expired and self._fill > 0.02
         self._set_blinking(show_hazard)
+        self._redraw()
+
+    def set_target_frac(self, frac):
+        """Set the target line position as a 0..1 body fraction (from mL)."""
+        self._target_frac = max(0.0, min(1.0, frac))
+        self._redraw()
+
+    def set_line_visible(self, visible):
+        """Show/hide the draggable target line (idle/brewing vs ready)."""
+        self._line_visible = visible
+        self._redraw()
+
+    def set_capacity_ml(self, capacity_ml):
+        """Full-pot capacity, used to label the target line in litres."""
+        self._capacity_ml = capacity_ml
+        self._redraw()
+
+    # --- target-line dragging -----------------------------------------
+    def _line_y(self):
+        b = self._body
+        return b["by"] + b["inset"] + b["fill_max"] * self._target_frac
+
+    def _y_to_frac(self, yy):
+        b = self._body
+        lo = b["by"] + b["inset"]
+        return max(0.0, min(1.0, (yy - lo) / b["fill_max"]))
+
+    def on_touch_down(self, touch):
+        if (
+            self._line_visible
+            and not self._expired
+            and self._body is not None
+            and self.collide_point(*touch.pos)
+            and abs(touch.y - self._line_y()) <= dp(28)
+        ):
+            self._dragging = True
+            touch.grab(self)
+            return True
+        return super().on_touch_down(touch)
+
+    def on_touch_move(self, touch):
+        if touch.grab_current is self and self._dragging:
+            self._commit_target(self._y_to_frac(touch.y))
+            return True
+        return super().on_touch_move(touch)
+
+    def on_touch_up(self, touch):
+        if touch.grab_current is self and self._dragging:
+            self._dragging = False
+            touch.ungrab(self)
+            # snap to 50 mL on release and notify
+            ml = round(self._target_frac * self._capacity_ml / 50.0) * 50
+            ml = max(250, min(self._capacity_ml, ml))
+            self._commit_target(ml / self._capacity_ml)
+            if self.on_target:
+                self.on_target(ml)
+            return True
+        return super().on_touch_up(touch)
+
+    def _commit_target(self, frac):
+        self._target_frac = max(0.0, min(1.0, frac))
         self._redraw()
 
     def _set_blinking(self, on):
@@ -256,6 +338,21 @@ class CarafeWidget(Widget):
         lx = cx - lid_w / 2
         ly = top - lid_h * 0.20
 
+        # Cache body geometry so touch handling can map y <-> fill fraction.
+        # The fillable band runs from (by+inset) up to (by+inset+fill_max),
+        # matching the coffee-fill drawing below.
+        inset = dp(5)
+        fill_max = body_h - 2 * inset
+        self._body = {
+            "cx": cx,
+            "top_w": top_w,
+            "base_w": base_w,
+            "by": by,
+            "body_h": body_h,
+            "inset": inset,
+            "fill_max": fill_max,
+        }
+
         with self.canvas:
             # --- angular cantilevered handle on the right (drawn first so
             # the body overlaps its inner end).  Juts right from the top,
@@ -282,8 +379,7 @@ class CarafeWidget(Widget):
             # just looks like coffee, so we let the biohazard symbol in an
             # empty steel carafe carry the "don't drink this" message. ---
             if self._fill > 0.01 and not self._expired:
-                inset = dp(5)
-                fh = (body_h - 2 * inset) * self._fill
+                fh = fill_max * self._fill
                 yb = by + inset
                 yt = yb + fh
                 # interpolate body half-width at yb and yt
@@ -340,6 +436,41 @@ class CarafeWidget(Widget):
                     ly + lid_h * 0.9,
                 ]
             )
+
+            # --- draggable brew-target line (dotted) + grab handle ---
+            if self._line_visible and not self._expired:
+                ly_line = by + inset + fill_max * self._target_frac
+                # body half-width at the line height, for span + handle x
+                t = (ly_line - by) / body_h
+                hw_line = ((base_w - top_w) * (1 - t) + top_w) / 2
+                Color(*INK)
+                # dashed line across the body
+                seg = dp(10)
+                xleft, xright = cx - hw_line, cx + hw_line
+                xx = xleft
+                while xx < xright:
+                    x2 = min(xx + seg, xright)
+                    Line(points=[xx, ly_line, x2, ly_line], width=dp(1.5))
+                    xx += seg * 2  # gap
+                # grab handle (small filled chevron/box) at the right end
+                Color(*ACCENT)
+                hs = dp(11)
+                RoundedRectangle(
+                    pos=(xright - hs, ly_line - hs / 2),
+                    size=(hs, hs),
+                    radius=[dp(3)],
+                )
+
+        # Position the target label just left of the line (outside canvas ctx).
+        if self._line_visible and not self._expired and self._body:
+            ly_line = by + inset + fill_max * self._target_frac
+            ml = self._target_frac * self._capacity_ml
+            self._label.text = "{:.2f} L".format(ml / 1000.0)
+            self._label.size = (dp(64), dp(22))
+            self._label.pos = (cx - base_w / 2 - dp(70), ly_line - dp(11))
+            self._label.opacity = 1
+        else:
+            self._label.opacity = 0
 
         # Biohazard overlay: expired AND coffee still present (fill>0 means
         # there's old coffee to dump; an expired *empty* pot is just empty).
