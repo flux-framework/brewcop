@@ -96,18 +96,28 @@ class ScaleBrewSource:
         # only cares about relative change + empty thresh.
         net = potstate.net_contents_g(raw, self._settings["pot_tare_g"])
         event = self._brains.store(net)
-        self._maybe_persist()
 
         stale_s = float(self._settings["stale_hours"]) * 3600.0
+        # Two orthogonal signals:
+        #  - is_stale(): the CURRENT ready batch is itself stale -> draw the pot
+        #    empty (stale coffee shouldn't look drinkable).  Goes False again
+        #    once a new brew starts.
+        #  - update_dirty(): a persistent "press CLEAN" latch, set once any
+        #    batch goes stale and cleared ONLY by CLEAN.  It survives into the
+        #    next brew, so the biohazard stays up as a reminder even over a
+        #    fresh pot.  The meatbags decide when to deal with it.
+        current_stale = self._brains.is_stale(stale_s)
+        needs_clean = self._brains.update_dirty(stale_s)
+        self._maybe_persist()
+
         pot = potstate.derive(
             raw_weight_g=raw,
             weight_is_valid=True,
             brew_state=self._brains.state,
             elapsed_s=self._brains.elapsed(),
             config=self._settings,
-            # "dirty" (biohazard) is simply a ready batch aged past stale;
-            # cleanup returns to idle, which clears it.
-            dirty=self._brains.is_stale(stale_s),
+            dirty=current_stale,
+            needs_clean=needs_clean,
         )
         self._last_pot = pot
         return PollResult(pot, event=event, raw_grams=raw, valid=True, moving=False)

@@ -147,6 +147,31 @@ class TestScaleBrewSource(unittest.TestCase):
         r3 = src.poll()
         self.assertEqual(r3.pot_state.key, "present")
 
+    def test_needs_clean_latch_survives_rebrew(self):
+        # A batch goes stale (needs_clean latched via the pot_state), then a
+        # NEW brew is started without cleaning: the fresh pot still carries the
+        # biohazard reminder (needs_clean stays True until clean_up()).
+        cfg = dict(SETTINGS, stale_hours=4.0)
+        clock = [1000.0]
+        sc = ScriptedScale([(795 + 1200, True)] * 8)
+        src = brewsource.ScaleBrewSource(sc, cfg)
+        src._brains._now = lambda: clock[0]  # injectable clock
+        src.start_brew(target_g=1200)
+        src.poll()  # -> ready at t=1000
+        clock[0] += 4 * 3600 + 10  # age past the stale window
+        r = src.poll()
+        self.assertTrue(r.pot_state.needs_clean)  # latched
+        # brew again WITHOUT cleaning -> still filling (target above current),
+        # but the nag persists over the fresh pot
+        src.start_brew(target_g=2000)
+        r2 = src.poll()
+        self.assertEqual(r2.pot_state.key, "brewing")
+        self.assertTrue(r2.pot_state.needs_clean)
+        # CLEAN clears it
+        src.clean_up()
+        r3 = src.poll()
+        self.assertFalse(r3.pot_state.needs_clean)
+
     def test_restores_persisted_ready_state(self):
         # A saved "ready" snapshot from a prior run is restored on init, so a
         # pot present at startup reads as ready (known age), not "present".
