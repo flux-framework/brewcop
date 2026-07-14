@@ -216,6 +216,7 @@ class CarafeWidget(Widget):
         # biohazard takes over once stale).
         self._age_text = ""
         self._age_s = None  # raw age seconds for the smiley clock (H:MM)
+        self._needs_clean = False  # persistent "press CLEAN" biohazard latch
         self._age_label = Label(
             text="",
             font_size=sp(30),
@@ -236,13 +237,19 @@ class CarafeWidget(Widget):
         self.bind(pos=self._redraw, size=self._redraw)
 
     # --- public state --------------------------------------------------
-    def set_state(self, fill, coffee_rgba, expired, age_text="", age_s=None):
+    def set_state(
+        self, fill, coffee_rgba, expired, age_text="", age_s=None, needs_clean=False
+    ):
         self._fill = max(0.0, min(1.0, fill))
         self._coffee = coffee_rgba
-        self._expired = expired
+        self._expired = expired  # current batch stale -> draw the body empty
         self._age_text = age_text  # shown inside the body while fresh/aging
         self._age_s = age_s  # raw seconds; drives the smiley clock (None=off)
-        show_hazard = expired and self._fill > 0.02
+        self._needs_clean = needs_clean  # persistent latch -> biohazard nag
+        # The biohazard is the "press CLEAN" reminder: it blinks whenever the
+        # latch is set and a pot is present (even a fresh new brew) -- it is no
+        # longer tied to the current batch's freshness.
+        show_hazard = needs_clean and self._fill > 0.02
         self._set_blinking(show_hazard)
         self._redraw()
 
@@ -506,19 +513,20 @@ class CarafeWidget(Widget):
         else:
             self._label.opacity = 0
 
-        # Biohazard overlay: expired AND coffee still present (fill>0 means
-        # there's old coffee to dump; an expired *empty* pot is just empty).
-        # The carafe is drawn empty above, so the blinking symbol sits in an
-        # empty steel body -- "gone bad, don't drink".
-        if self._expired and self._fill > 0.02:
+        # Biohazard overlay: the persistent "press CLEAN" latch AND a pot is
+        # present (fill>0).  It is no longer tied to the current batch -- it
+        # blinks over a stale pot, an emptied-but-unwashed pot, OR a fresh new
+        # brew started before CLEAN was pressed, and only CLEAN clears it.
+        if self._needs_clean and self._fill > 0.02:
             body_cy = by + body_h * 0.42
             self._draw_hazard(cx, body_cy, min(top_w, base_w), body_h)
 
         # Fresh/aging coffee: draw a smiley in the SAME spot the biohazard
         # would go (the happy counterpart to "gone bad").  Below it, an elapsed
         # clock in H:MM -- but only once a full minute has passed, so a
-        # just-brewed pot shows a clean smiley with no "0:00" noise.
-        if self._age_text and not self._expired:
+        # just-brewed pot shows a clean smiley with no "0:00" noise.  The
+        # biohazard takes precedence: while a clean is pending, no smiley.
+        if self._age_text and not self._needs_clean:
             body_cy = by + body_h * 0.42
             self._draw_smiley(cx, body_cy, min(top_w, base_w), body_h)
             if self._age_s is not None and self._age_s >= 60:
@@ -843,23 +851,33 @@ class HomeScreen(Screen):
         Clock.schedule_once(_end, seconds)
 
     def _render(self, pot):
-        expired = pot.expired  # dirtiness decided by Brains, carried here
-        # No persistent status text: the carafe (fill + age clock + biohazard)
-        # and the weight readout carry the state visually.  The status label is
-        # used only for transient flash messages; clear it when not flashing.
+        # Two carafe signals: `expired` empties the body when the CURRENT batch
+        # is stale (stale coffee shouldn't look drinkable); `needs_clean` is the
+        # persistent "press CLEAN" latch that drives the biohazard reminder
+        # independently -- it stays lit into a fresh new brew until CLEAN.
+        expired = pot.expired
+        # No persistent status text: the carafe (fill + smiley/clock +
+        # biohazard) and the weight readout carry the state visually.  The
+        # status label is used only for transient flash messages; clear it when
+        # not flashing.
         if not self._flashing:
             self.status.text = ""
 
         # Always draw the carafe (even with no pot on the scale it shows as an
         # empty carafe -- the fixed frame the target line and fill relate to).
-        # While fresh/aging the carafe shows a smiley (happy counterpart to the
-        # biohazard) plus an H:MM clock once a minute has passed.  age_text is
-        # just the on/off marker for that; age_s drives the clock.
+        # While fresh/aging (and no clean pending) the carafe shows a smiley
+        # plus an H:MM clock once a minute has passed; age_text is just the
+        # on/off marker for that, age_s drives the clock.
         self.carafe.opacity = 1.0
         coffee = AMBER if pot.key == "aging" else GREEN
         age_text = pot.key if pot.key in ("fresh", "aging") else ""
         self.carafe.set_state(
-            pot.fill, coffee, expired, age_text=age_text, age_s=pot.age_s
+            pot.fill,
+            coffee,
+            expired,
+            age_text=age_text,
+            age_s=pot.age_s,
+            needs_clean=pot.needs_clean,
         )
         # Actions live in the app-level rail (BREW / CLEAN / WEIGH), enabled
         # per state by App.refresh_rail(); nothing to do here.
@@ -1360,27 +1378,15 @@ class BrewcopApp(App):
         return brains.state if brains is not None else "idle"
 
     # --- action rail ---------------------------------------------------
-    def _biohazard_showing(self):
-        # The one interlock: a stale pot with coffee still in it (exactly the
-        # carafe's biohazard draw condition).  BREW is blocked while this is
-        # true; CLEAN clears it.  No other (weight-based) gates.
-        pot = self.home._pot
-        return pot.expired and pot.fill > 0.02
-
     def refresh_rail(self):
-        # The rail buttons always work, with a single interlock:
-        #   BREW  - blocked only while the biohazard is showing (a stale pot
-        #           must be CLEANed first).  Otherwise always available --
-        #           pressing it (re)starts a brew and resets the clock.
-        #   CLEAN - always: clears the biohazard / resets to idle from any
-        #           state.  No "empty the pot first" gate.
-        #   WEIGH - always
-        if self.mock:
-            # No real state machine; keep everything live so the mock is usable.
-            self._enable(self._brew_btn, True)
-            self._enable(self._clean_btn, True)
-            return
-        self._enable(self._brew_btn, not self._biohazard_showing())
+        # All rail buttons always work -- no interlocks.  The biohazard is a
+        # persistent "press CLEAN" reminder that rides along (even into a fresh
+        # brew) until CLEAN is pressed; we let the meatbags sort things out.
+        #   BREW  - (re)starts a brew and resets the clock; leaves any pending
+        #           needs-clean latch set (the biohazard stays as a reminder).
+        #   CLEAN - clears the biohazard / resets to idle from any state.
+        #   WEIGH - always.
+        self._enable(self._brew_btn, True)
         self._enable(self._clean_btn, True)
 
     @staticmethod
@@ -1389,9 +1395,9 @@ class BrewcopApp(App):
         btn.opacity = 1.0 if on else 0.35
 
     def _rail_brew(self):
-        # Blocked only by the biohazard; otherwise start/restart the brew.
-        if self._biohazard_showing():
-            return
+        # Always start/restart the brew (resets the clock).  A pending
+        # needs-clean latch is intentionally left set -- the biohazard stays
+        # up over the fresh pot until someone presses CLEAN.
         self._go("home")
         self.source.start_brew(target_g=self.home._target_ml)
         self.home.tick()
