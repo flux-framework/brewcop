@@ -624,6 +624,7 @@ class HomeScreen(Screen):
         self.app = app  # for source.poll(), notify(), settings
         self._last_key = None  # for wake-on-event edge detection
         self._flashing = False  # suppress status updates while flashing a msg
+        self._last_grams = 0.0  # last valid raw reading, held while moving
         root = BoxLayout(orientation="vertical", padding=dp(24), spacing=dp(16))
 
         # top bar: title centered across the FULL width (badge + settings
@@ -772,7 +773,8 @@ class HomeScreen(Screen):
         # (which was jarring) -- same as the Weigh screen, which just keeps its
         # last valid value.  Blank only until we've had a first reading.
         if result.raw_grams is not None:
-            self.weight_lbl.text = "{:.0f} g".format(result.raw_grams)
+            self._last_grams = result.raw_grams
+        self.weight_lbl.text = "{:.0f} g".format(self._last_grams)
 
         # Notify + wake on the brewing->ready transition (app gates Slack).
         if result.event == "ready":
