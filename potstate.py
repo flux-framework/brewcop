@@ -42,12 +42,14 @@ AGING_FRACTION = 0.5
 class PotState:
     """Plain result record (no UI types)."""
 
-    def __init__(self, key, text, fill=0.0, expired=False, age=""):
+    def __init__(self, key, text, fill=0.0, expired=False, age="", age_s=None):
         self.key = key
         self.text = text
         self.fill = fill
         self.expired = expired
         self.age = age  # compact elapsed string (for the carafe age clock)
+        self.age_s = age_s  # raw elapsed seconds (None if not aging), so the
+        # UI can format the smiley clock (H:MM, hidden under a minute)
 
     def __eq__(self, other):
         return isinstance(other, PotState) and (
@@ -170,6 +172,7 @@ def derive(
             fill,
             False,
             age=elapsed_txt,
+            age_s=elapsed_s,
         )
 
     return PotState(
@@ -178,6 +181,7 @@ def derive(
         fill,
         False,
         age=elapsed_txt,
+        age_s=elapsed_s,
     )
 
 
