@@ -30,8 +30,12 @@ CONFIG = {
 STALE_S = CONFIG["stale_hours"] * 3600.0
 
 
-def derive(raw_g, brew_state="ready", elapsed=0, valid=True, dirty=False):
-    return potstate.derive(raw_g, valid, brew_state, elapsed, CONFIG, dirty=dirty)
+def derive(
+    raw_g, brew_state="ready", elapsed=0, valid=True, dirty=False, needs_clean=False
+):
+    return potstate.derive(
+        raw_g, valid, brew_state, elapsed, CONFIG, dirty=dirty, needs_clean=needs_clean
+    )
 
 
 class TestNetContents(unittest.TestCase):
@@ -128,6 +132,35 @@ class TestDerive(unittest.TestCase):
         s = derive(795, brew_state="idle", elapsed=STALE_S * 5, dirty=False)
         self.assertEqual(s.key, "empty")
         self.assertFalse(s.expired)
+
+    def test_needs_clean_rides_along_on_fresh_brew(self):
+        # A fresh brew started before CLEAN was pressed: fills normally (not
+        # expired, real fill), but carries the needs_clean nag so the UI shows
+        # the biohazard over the climbing pot.
+        s = derive(795 + 400, brew_state="brewing", elapsed=30, needs_clean=True)
+        self.assertEqual(s.key, "brewing")
+        self.assertFalse(s.expired)  # body NOT drawn empty -- it's fresh
+        self.assertGreater(s.fill, 0)
+        self.assertTrue(s.needs_clean)  # but the reminder rides along
+
+    def test_needs_clean_on_ready_fresh_pot(self):
+        # ready + fresh (not stale), but a prior clean is still pending
+        s = derive(795 + 900, brew_state="ready", elapsed=60, needs_clean=True)
+        self.assertEqual(s.key, "fresh")
+        self.assertFalse(s.expired)
+        self.assertTrue(s.needs_clean)
+
+    def test_needs_clean_on_empty_pot(self):
+        # a dumped-but-unwashed pot: empty, not expired, but nag persists
+        s = derive(795, brew_state="idle", elapsed=0, needs_clean=True)
+        self.assertEqual(s.key, "empty")
+        self.assertTrue(s.needs_clean)
+
+    def test_no_pot_still_carries_needs_clean(self):
+        # pot removed while a clean is pending -> nag re-asserts on return
+        s = derive(0, brew_state="idle", needs_clean=True)
+        self.assertEqual(s.key, "no_pot")
+        self.assertTrue(s.needs_clean)
 
     def test_config_capacity_drives_fill(self):
         # smaller configured capacity -> larger fill fraction for same grams

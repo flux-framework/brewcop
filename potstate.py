@@ -42,14 +42,25 @@ AGING_FRACTION = 0.5
 class PotState:
     """Plain result record (no UI types)."""
 
-    def __init__(self, key, text, fill=0.0, expired=False, age="", age_s=None):
+    def __init__(
+        self,
+        key,
+        text,
+        fill=0.0,
+        expired=False,
+        age="",
+        age_s=None,
+        needs_clean=False,
+    ):
         self.key = key
         self.text = text
         self.fill = fill
-        self.expired = expired
+        self.expired = expired  # current batch is itself stale -> draw empty
         self.age = age  # compact elapsed string (for the carafe age clock)
         self.age_s = age_s  # raw elapsed seconds (None if not aging), so the
         # UI can format the smiley clock (H:MM, hidden under a minute)
+        self.needs_clean = needs_clean  # persistent "press CLEAN" latch ->
+        # biohazard reminder (survives a new brew; cleared only by CLEAN)
 
     def __eq__(self, other):
         return isinstance(other, PotState) and (
@@ -103,6 +114,7 @@ def derive(
     elapsed_s,
     config,
     dirty=False,
+    needs_clean=False,
 ):
     """
     Compute the PotState to display.
@@ -113,10 +125,14 @@ def derive(
       brew_state        Brains state: idle|brewing|ready
       elapsed_s         coffee age (ready) or time-in-state, seconds
       config            pot_tare_g, pot_capacity_ml, empty_thresh_g, stale_hours
-      dirty             pot needs cleaning: a batch went stale and the pot
-                        hasn't been cleaned since (from Brains.is_dirty).  The
-                        biohazard is driven by THIS, not by elapsed, so it
-                        persists across dumping/rebrew until CLEAN.
+      dirty             the CURRENT ready batch is itself stale -> draw the pot
+                        empty (stale coffee shouldn't look drinkable).  Goes
+                        False once a new brew starts.
+      needs_clean       persistent "press CLEAN" latch (Brains.dirty): set once
+                        any batch went stale, survives a new brew, cleared only
+                        by CLEAN.  Drives the biohazard reminder INDEPENDENTLY
+                        of the current batch -- so a fresh pot brewed without
+                        cleaning still shows the nag.
 
     Returns a PotState.  Pure function -- no side effects.
     """
@@ -132,39 +148,59 @@ def derive(
     net = net_contents_g(raw_weight_g, tare)
 
     # Below the pot tare: nothing (or nothing pot-like) on the scale.  Show
-    # no_pot even if the pot is "dirty" -- there's nothing to draw a hazard
-    # over; the dirty flag persists in Brains and re-asserts when a pot
+    # no_pot even if a clean is pending -- there's nothing to draw a hazard
+    # over; the needs_clean latch persists in Brains and re-asserts when a pot
     # returns.  (Home shows the raw weight separately.)
     if net < 0:
-        return PotState("no_pot", "No pot on scale", 0.0, False)
+        return PotState(
+            "no_pot", "No pot on scale", 0.0, False, needs_clean=needs_clean
+        )
 
     fill = max(0.0, min(1.0, net / capacity)) if capacity > 0 else 0.0
     litres = net / 1000.0
     elapsed_txt = fmt_elapsed(elapsed_s)
 
-    # Dirty pot (a batch went stale, not cleaned since).  Drives the
-    # biohazard and survives dumping/rebrew.  Rendered like the old "stale"
-    # (empty carafe + hazard), whether or not coffee is still present.
+    # Current batch is itself stale (dirty): render like the old "stale" --
+    # empty carafe (stale coffee shouldn't look drinkable).  The biohazard
+    # (needs_clean) rides along too; it will already be latched here.
     if dirty:
         return PotState(
-            "stale", "Stale coffee - please dump ({})".format(elapsed_txt), fill, True
+            "stale",
+            "Stale coffee - please dump ({})".format(elapsed_txt),
+            fill,
+            True,
+            needs_clean=needs_clean,
         )
 
-    # Pot present but effectively empty (and not dirty).
+    # Pot present but effectively empty.
     if net <= empty_thresh:
-        return PotState("empty", "Empty pot", fill, False)
+        return PotState("empty", "Empty pot", fill, False, needs_clean=needs_clean)
 
-    # Brewing (armed via BREW, filling toward the target).
+    # Brewing (armed via BREW, filling toward the target).  needs_clean may be
+    # set here -- a fresh brew started before CLEAN was pressed -- and the UI
+    # shows the biohazard reminder over the climbing fill.
     if brew_state == "brewing":
-        return PotState("brewing", "Brewing - {}".format(elapsed_txt), fill, False)
+        return PotState(
+            "brewing",
+            "Brewing - {}".format(elapsed_txt),
+            fill,
+            False,
+            needs_clean=needs_clean,
+        )
 
     # Coffee present but no active batch (idle): a pot is sitting on the scale
     # that we were not told to brew -- show the level, but claim no freshness
     # (no timer).  Reaching "fresh"/"stale" requires an explicit BREW.
     if brew_state != "ready":
-        return PotState("present", "Coffee: ~{:.2f} L".format(litres), fill, False)
+        return PotState(
+            "present",
+            "Coffee: ~{:.2f} L".format(litres),
+            fill,
+            False,
+            needs_clean=needs_clean,
+        )
 
-    # ready and not dirty: fresh -> aging by the (known) age.
+    # ready: fresh -> aging by the (known) age.
     if elapsed_s >= stale_s * AGING_FRACTION:
         return PotState(
             "aging",
@@ -173,6 +209,7 @@ def derive(
             False,
             age=elapsed_txt,
             age_s=elapsed_s,
+            needs_clean=needs_clean,
         )
 
     return PotState(
@@ -182,6 +219,7 @@ def derive(
         False,
         age=elapsed_txt,
         age_s=elapsed_s,
+        needs_clean=needs_clean,
     )
 
 
