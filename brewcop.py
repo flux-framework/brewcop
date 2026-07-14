@@ -1379,15 +1379,23 @@ class BrewcopApp(App):
 
     # --- action rail ---------------------------------------------------
     def refresh_rail(self):
-        # All rail buttons always work -- no interlocks.  The biohazard is a
-        # persistent "press CLEAN" reminder that rides along (even into a fresh
-        # brew) until CLEAN is pressed; we let the meatbags sort things out.
-        #   BREW  - (re)starts a brew and resets the clock; leaves any pending
-        #           needs-clean latch set (the biohazard stays as a reminder).
-        #   CLEAN - clears the biohazard / resets to idle from any state.
+        # No weight interlocks.  The biohazard is a persistent "press CLEAN"
+        # reminder that rides along (even into a fresh brew) until CLEAN is
+        # pressed; we let the meatbags sort things out.
+        #   BREW  - always: (re)starts a brew and resets the clock; leaves any
+        #           pending needs-clean latch set (the biohazard stays up).
+        #   CLEAN - only when a clean is actually pending (the latch is set).
+        #           Otherwise it is a no-op / greyed, so an accidental press
+        #           can't wipe the age of good coffee -- the pot keeps aging.
         #   WEIGH - always.
         self._enable(self._brew_btn, True)
-        self._enable(self._clean_btn, True)
+        self._enable(self._clean_btn, self.mock or self._clean_pending())
+
+    def _clean_pending(self):
+        # A clean is pending when the needs-clean latch is set (the same signal
+        # that drives the biohazard) -- not the drawn hazard, so CLEAN still
+        # works after the pot has been dumped (hazard gone, latch still set).
+        return bool(getattr(self.home._pot, "needs_clean", False))
 
     @staticmethod
     def _enable(btn, on):
@@ -1403,7 +1411,11 @@ class BrewcopApp(App):
         self.home.tick()
 
     def _rail_clean(self):
-        # Always clears to idle (drops the biohazard / any in-progress brew).
+        # No-op unless a clean is actually pending, so pressing CLEAN with good
+        # coffee in the pot leaves it aging untouched.  When pending, clear the
+        # latch and reset to idle.
+        if not (self.mock or self._clean_pending()):
+            return
         self._go("home")
         self.source.clean_up()
         self.home.tick()
