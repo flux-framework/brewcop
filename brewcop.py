@@ -217,6 +217,7 @@ class CarafeWidget(Widget):
         self._age_text = ""
         self._age_s = None  # raw age seconds for the smiley clock (H:MM)
         self._needs_clean = False  # persistent "press CLEAN" biohazard latch
+        self._brewing = False  # in-progress brew -> rain-cloud icon
         self._age_label = Label(
             text="",
             font_size=sp(30),
@@ -238,7 +239,14 @@ class CarafeWidget(Widget):
 
     # --- public state --------------------------------------------------
     def set_state(
-        self, fill, coffee_rgba, expired, age_text="", age_s=None, needs_clean=False
+        self,
+        fill,
+        coffee_rgba,
+        expired,
+        age_text="",
+        age_s=None,
+        needs_clean=False,
+        brewing=False,
     ):
         self._fill = max(0.0, min(1.0, fill))
         self._coffee = coffee_rgba
@@ -246,11 +254,12 @@ class CarafeWidget(Widget):
         self._age_text = age_text  # shown inside the body while fresh/aging
         self._age_s = age_s  # raw seconds; drives the smiley clock (None=off)
         self._needs_clean = needs_clean  # persistent latch -> biohazard nag
-        # The biohazard is the "press CLEAN" reminder: it blinks whenever the
-        # latch is set and a pot is present (even a fresh new brew) -- it is no
-        # longer tied to the current batch's freshness.
+        self._brewing = brewing  # in-progress brew -> rain-cloud icon
+        # The blink clock drives two animations: the biohazard "press CLEAN"
+        # reminder (blinks whenever the latch is set and a pot is present) and
+        # the brewing rain-cloud's falling drops.  Run it if either is active.
         show_hazard = needs_clean and self._fill > 0.02
-        self._set_blinking(show_hazard)
+        self._set_blinking(show_hazard or brewing)
         self._redraw()
 
     def set_target_frac(self, frac):
@@ -521,11 +530,18 @@ class CarafeWidget(Widget):
             body_cy = by + body_h * 0.42
             self._draw_hazard(cx, body_cy, min(top_w, base_w), body_h)
 
+        # Brewing: a rain-cloud icon in the same spot (drops falling into the
+        # pot), so pressing BREW gives immediate feedback before the goal is
+        # reached.  Yields to the biohazard (persistent clean reminder) just
+        # like the smiley does.
+        if self._brewing and not self._needs_clean:
+            body_cy = by + body_h * 0.42
+            self._draw_brewing(cx, body_cy, min(top_w, base_w), body_h)
+
         # Fresh/aging coffee: draw a smiley in the SAME spot the biohazard
         # would go (the happy counterpart to "gone bad").  Below it, an elapsed
-        # clock in H:MM -- but only once a full minute has passed, so a
-        # just-brewed pot shows a clean smiley with no "0:00" noise.  The
-        # biohazard takes precedence: while a clean is pending, no smiley.
+        # clock in H:MM.  The biohazard takes precedence: while a clean is
+        # pending, no smiley.
         if self._age_text and not self._needs_clean:
             body_cy = by + body_h * 0.42
             self._draw_smiley(cx, body_cy, min(top_w, base_w), body_h)
@@ -570,6 +586,44 @@ class CarafeWidget(Widget):
             # o'clock, clockwise; 180 is the bottom).  120..240 sweeps a
             # symmetric bottom arc -> an upturned smile.
             Line(circle=(cxc, cyc + r * 0.05, r * 0.55, 120, 240), width=lw)
+
+    def _draw_brewing(self, cxc, cyc, ref_w, ref_h):
+        """Rain-cloud icon inside the carafe body -- the brewing counterpart to
+        the smiley: a puffy cloud with drops falling into the pot.  The drops
+        shift with the blink clock so the rain animates.  `cxc, cyc` is the
+        icon center (Kivy y is up, so the cloud sits above cyc, drops below)."""
+        side = min(ref_w * 0.72, ref_h * 0.44)
+        r = side / 2.0
+        # cloud body sits a bit ABOVE center so drops have room below it
+        ccx, ccy = cxc, cyc + r * 0.20
+        with self.canvas.before:
+            # puffy cloud: overlapping filled ellipses + a flat bottom slab.
+            # (ox, oy, radius) in units of r, oy positive = up.
+            Color(*INK)
+            for ox, oy, pr in (
+                (-0.55, -0.05, 0.42),
+                (0.0, 0.25, 0.55),
+                (0.6, -0.05, 0.45),
+                (-0.15, -0.20, 0.50),
+                (0.3, -0.22, 0.48),
+            ):
+                px, py, pr_px = ccx + ox * r, ccy + oy * r, pr * r
+                Ellipse(pos=(px - pr_px, py - pr_px), size=(pr_px * 2, pr_px * 2))
+            RoundedRectangle(
+                pos=(ccx - r * 0.72, ccy - r * 0.45),
+                size=(r * 1.47, r * 0.5),
+                radius=[r * 0.12],
+            )
+            # falling drops (blue), below the cloud.  Two-phase vertical shift
+            # from the blink clock gives a simple rain animation.
+            Color(*ACCENT)
+            phase = 0.0 if self._blink_on else r * 0.22
+            drop_top = ccy - r * 0.55
+            dl = r * 0.34  # drop length
+            for i, ox in enumerate((-0.4, 0.05, 0.5)):
+                dx = ccx + ox * r
+                dy = drop_top - (i % 2) * r * 0.18 - phase
+                Line(points=[dx, dy, dx, dy - dl], width=dp(2.5), cap="round")
 
     def _poly(self, pts):
         """Fill a convex polygon (flat x,y list) via a Mesh triangle fan,
@@ -878,6 +932,7 @@ class HomeScreen(Screen):
             age_text=age_text,
             age_s=pot.age_s,
             needs_clean=pot.needs_clean,
+            brewing=(pot.key == "brewing"),
         )
         # Actions live in the app-level rail (BREW / CLEAN / WEIGH), enabled
         # per state by App.refresh_rail(); nothing to do here.
