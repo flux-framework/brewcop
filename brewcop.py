@@ -66,7 +66,7 @@ from kivy.app import App
 from kivy.clock import Clock
 from kivy.core.image import Image as CoreImage
 from kivy.core.window import Window
-from kivy.graphics import Color, RoundedRectangle, Rectangle, Line, Mesh
+from kivy.graphics import Color, RoundedRectangle, Rectangle, Line, Mesh, Ellipse
 from kivy.metrics import dp, sp
 from kivy.uix.boxlayout import BoxLayout
 from kivy.uix.button import Button
@@ -215,6 +215,7 @@ class CarafeWidget(Widget):
         # Age clock shown inside the body while coffee is fresh/aging (the
         # biohazard takes over once stale).
         self._age_text = ""
+        self._age_s = None  # raw age seconds for the smiley clock (H:MM)
         self._age_label = Label(
             text="",
             font_size=sp(30),
@@ -235,11 +236,12 @@ class CarafeWidget(Widget):
         self.bind(pos=self._redraw, size=self._redraw)
 
     # --- public state --------------------------------------------------
-    def set_state(self, fill, coffee_rgba, expired, age_text=""):
+    def set_state(self, fill, coffee_rgba, expired, age_text="", age_s=None):
         self._fill = max(0.0, min(1.0, fill))
         self._coffee = coffee_rgba
         self._expired = expired
         self._age_text = age_text  # shown inside the body while fresh/aging
+        self._age_s = age_s  # raw seconds; drives the smiley clock (None=off)
         show_hazard = expired and self._fill > 0.02
         self._set_blinking(show_hazard)
         self._redraw()
@@ -512,16 +514,54 @@ class CarafeWidget(Widget):
             body_cy = by + body_h * 0.42
             self._draw_hazard(cx, body_cy, min(top_w, base_w), body_h)
 
-        # Age clock inside the body while fresh/aging (not expired, and we
-        # have an age to show).  This is the counterpart to the biohazard:
-        # clock = good coffee + how old; biohazard = stale.
+        # Fresh/aging coffee: draw a smiley in the SAME spot the biohazard
+        # would go (the happy counterpart to "gone bad").  Below it, an elapsed
+        # clock in H:MM -- but only once a full minute has passed, so a
+        # just-brewed pot shows a clean smiley with no "0:00" noise.
         if self._age_text and not self._expired:
-            self._age_label.text = self._age_text
-            self._age_label.size = (min(top_w, base_w), dp(40))
-            self._age_label.pos = (cx - min(top_w, base_w) / 2, by + body_h * 0.5)
-            self._age_label.opacity = 1
+            body_cy = by + body_h * 0.42
+            self._draw_smiley(cx, body_cy, min(top_w, base_w), body_h)
+            if self._age_s is not None and self._age_s >= 60:
+                self._age_label.text = self._fmt_clock(self._age_s)
+                self._age_label.size = (min(top_w, base_w), dp(36))
+                # sit the clock just below the smiley
+                self._age_label.pos = (
+                    cx - min(top_w, base_w) / 2,
+                    body_cy
+                    - min(min(top_w, base_w) * 0.72, body_h * 0.44) / 2
+                    - dp(34),
+                )
+                self._age_label.opacity = 1
+            else:
+                self._age_label.opacity = 0
         else:
             self._age_label.opacity = 0
+
+    @staticmethod
+    def _fmt_clock(seconds):
+        """Elapsed time as H:MM (e.g. 0:05, 1:23) for the smiley clock."""
+        m = int(max(0, seconds)) // 60
+        return "{}:{:02d}".format(m // 60, m % 60)
+
+    def _draw_smiley(self, cxc, cyc, ref_w, ref_h):
+        """Happy face inside the carafe body -- the fresh-coffee counterpart to
+        the biohazard, drawn at the same location.  `cxc, cyc` is the center."""
+        side = min(ref_w * 0.72, ref_h * 0.44)
+        r = side / 2.0
+        lw = dp(3)
+        with self.canvas.before:
+            Color(*INK)
+            # face circle (Line ellipse via a rounded... use Line circle)
+            Line(circle=(cxc, cyc, r), width=lw)
+            # eyes
+            eye_r = r * 0.12
+            ey = cyc + r * 0.28  # up (Kivy y is up)
+            for ex in (cxc - r * 0.34, cxc + r * 0.34):
+                Ellipse(pos=(ex - eye_r, ey - eye_r), size=(eye_r * 2, eye_r * 2))
+            # smile: lower arc (Kivy Line circle angles in degrees, 0 at 12
+            # o'clock, clockwise; 180 is the bottom).  120..240 sweeps a
+            # symmetric bottom arc -> an upturned smile.
+            Line(circle=(cxc, cyc + r * 0.05, r * 0.55, 120, 240), width=lw)
 
     def _poly(self, pts):
         """Fill a convex polygon (flat x,y list) via a Mesh triangle fan,
@@ -812,18 +852,15 @@ class HomeScreen(Screen):
 
         # Always draw the carafe (even with no pot on the scale it shows as an
         # empty carafe -- the fixed frame the target line and fill relate to).
-        # Show a labeled age clock inside the body while fresh/aging:
-        # "Fresh Coffee" / "Aging" over the elapsed time.  (Biohazard takes
-        # over once stale; idle/present/empty show nothing.)
+        # While fresh/aging the carafe shows a smiley (happy counterpart to the
+        # biohazard) plus an H:MM clock once a minute has passed.  age_text is
+        # just the on/off marker for that; age_s drives the clock.
         self.carafe.opacity = 1.0
         coffee = AMBER if pot.key == "aging" else GREEN
-        if pot.key == "fresh":
-            age_text = "Fresh Coffee\n{}".format(pot.age)
-        elif pot.key == "aging":
-            age_text = "Aging\n{}".format(pot.age)
-        else:
-            age_text = ""
-        self.carafe.set_state(pot.fill, coffee, expired, age_text=age_text)
+        age_text = pot.key if pot.key in ("fresh", "aging") else ""
+        self.carafe.set_state(
+            pot.fill, coffee, expired, age_text=age_text, age_s=pot.age_s
+        )
         # Actions live in the app-level rail (BREW / CLEAN / WEIGH), enabled
         # per state by App.refresh_rail(); nothing to do here.
 
