@@ -492,7 +492,7 @@ class CarafeWidget(Widget):
         if self._line_visible and not self._expired and self._body:
             ly_line = by + inset + fill_max * self._target_frac
             ml = self._target_frac * self._capacity_ml
-            self._label.text = "extraction\n{:.0f} mL".format(ml)
+            self._label.text = "goal\n{:.0f} mL".format(ml)
             self._label.halign = "center"
             self._label.valign = "middle"
             lw, lh = dp(100), dp(48)
