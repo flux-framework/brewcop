@@ -1450,7 +1450,11 @@ class BrewcopApp(App):
         # A clean is pending when the needs-clean latch is set (the same signal
         # that drives the biohazard) -- not the drawn hazard, so CLEAN still
         # works after the pot has been dumped (hazard gone, latch still set).
-        return bool(getattr(self.home._pot, "needs_clean", False))
+        # HomeScreen.__init__ ticks (-> refresh_rail) before self.home is
+        # assigned in build(), so tolerate home/_pot not existing yet.
+        home = getattr(self, "home", None)
+        pot = getattr(home, "_pot", None) if home is not None else None
+        return bool(getattr(pot, "needs_clean", False))
 
     @staticmethod
     def _enable(btn, on):
