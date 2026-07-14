@@ -62,6 +62,11 @@ class Brains:
         self.target_g = None  # dialed brew target while brewing
         self.timestamp = 0  # when the current state was entered
         self._net = 0.0  # last contents-weight sample
+        # "Needs clean" latch: set once a ready batch ages past the stale
+        # timeout, and NOT cleared by a subsequent brew -- only by clean_up().
+        # It is what keeps the biohazard on-screen as a "press CLEAN" reminder
+        # even into the next brew (the meatbags decide when to deal with it).
+        self.dirty = False
 
     # --- user-driven transitions --------------------------------------
     def start_brew(self, target_g):
@@ -71,9 +76,11 @@ class Brains:
         self._set_state("brewing")
 
     def clean_up(self):
-        """CLEAN UP pressed: batch dealt with, return to idle."""
+        """CLEAN UP pressed: batch dealt with, return to idle and clear the
+        needs-clean latch (the ONLY thing that clears it)."""
         self.ready_time = None
         self.target_g = None
+        self.dirty = False
         self._set_state("idle")
 
     # --- measurement ---------------------------------------------------
@@ -104,12 +111,22 @@ class Brains:
 
     # --- derived --------------------------------------------------------
     def is_stale(self, stale_s, now=None):
-        """True if a ready batch has aged past the stale threshold."""
+        """True if the *current* ready batch has aged past the stale threshold.
+        A pure freshness query (drives drawing the pot empty); the persistent
+        biohazard reminder uses the `dirty` latch, not this."""
         if self.state != "ready" or self.ready_time is None:
             return False
         if now is None:
             now = self._now()
         return (now - self.ready_time) >= stale_s
+
+    def update_dirty(self, stale_s, now=None):
+        """Latch the needs-clean flag once the current ready batch goes stale.
+        Called each poll.  Once set, it stays set through a new brew and only
+        clean_up() clears it.  Returns the current latch value."""
+        if self.is_stale(stale_s, now=now):
+            self.dirty = True
+        return self.dirty
 
     def elapsed(self, now=None):
         """
@@ -135,6 +152,7 @@ class Brains:
             "ready_time": self.ready_time,
             "target_g": self.target_g,
             "timestamp": self.timestamp,
+            "dirty": self.dirty,
         }
 
     def restore(self, snap):
@@ -144,6 +162,7 @@ class Brains:
         self.ready_time = snap.get("ready_time", self.ready_time)
         self.target_g = snap.get("target_g", self.target_g)
         self.timestamp = snap.get("timestamp", self.timestamp)
+        self.dirty = snap.get("dirty", self.dirty)
 
 
 # vim: tabstop=4 shiftwidth=4 expandtab

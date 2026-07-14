@@ -135,6 +135,43 @@ class TestBrains(unittest.TestCase):
         self.assertIsNone(event)
         self.assertEqual(b.state, "idle")
 
+    def test_dirty_latch_sets_when_stale(self):
+        b, clk = make()
+        stale = 4 * 3600
+        b.start_brew(target_g=1250)
+        b.store(1250)  # ready
+        self.assertFalse(b.update_dirty(stale))  # fresh
+        clk.advance(stale + 10)
+        self.assertTrue(b.update_dirty(stale))  # latched
+        self.assertTrue(b.dirty)
+
+    def test_dirty_latch_survives_new_brew(self):
+        # The needs-clean latch persists through a fresh brew: only CLEAN
+        # clears it, so the biohazard stays up as a reminder over the new pot.
+        b, clk = make()
+        stale = 4 * 3600
+        b.start_brew(target_g=1250)
+        b.store(1250)
+        clk.advance(stale + 10)
+        b.update_dirty(stale)
+        self.assertTrue(b.dirty)
+        b.start_brew(target_g=1000)  # brew again WITHOUT cleaning
+        self.assertEqual(b.state, "brewing")
+        self.assertTrue(b.dirty)  # still latched
+        b.store(1000)  # new pot becomes ready
+        self.assertTrue(b.dirty)  # STILL latched (fresh pot, but nag remains)
+
+    def test_dirty_latch_cleared_only_by_clean_up(self):
+        b, clk = make()
+        stale = 4 * 3600
+        b.start_brew(target_g=1250)
+        b.store(1250)
+        clk.advance(stale + 10)
+        b.update_dirty(stale)
+        self.assertTrue(b.dirty)
+        b.clean_up()
+        self.assertFalse(b.dirty)  # CLEAN is the only thing that clears it
+
 
 class TestPersistence(unittest.TestCase):
     def test_snapshot_restore_preserves_ready_age(self):
@@ -163,6 +200,20 @@ class TestPersistence(unittest.TestCase):
         b, _ = make()
         b.restore(None)
         self.assertEqual(b.state, "idle")
+
+    def test_snapshot_restore_preserves_dirty_latch(self):
+        # a needs-clean pot that reboots must come back still dirty (the
+        # biohazard reminder should survive a power cycle until CLEAN)
+        b, clk = make()
+        stale = 4 * 3600
+        b.start_brew(target_g=1250)
+        b.store(1250)
+        clk.advance(stale + 10)
+        b.update_dirty(stale)
+        snap = b.snapshot()
+        b2 = brains.Brains(empty_thresh=50, now=clk)
+        b2.restore(snap)
+        self.assertTrue(b2.dirty)
 
 
 if __name__ == "__main__":
