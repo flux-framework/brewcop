@@ -1360,22 +1360,28 @@ class BrewcopApp(App):
         return brains.state if brains is not None else "idle"
 
     # --- action rail ---------------------------------------------------
+    def _biohazard_showing(self):
+        # The one interlock: a stale pot with coffee still in it (exactly the
+        # carafe's biohazard draw condition).  BREW is blocked while this is
+        # true; CLEAN clears it.  No other (weight-based) gates.
+        pot = self.home._pot
+        return pot.expired and pot.fill > 0.02
+
     def refresh_rail(self):
-        # Enable/disable the fixed rail buttons per brew state:
-        #   BREW  - only when idle.  A ready batch (even an emptied one) must
-        #           be CLEANed first; the biohazard signals that.
-        #   CLEAN - when NOT idle: cleans up a ready batch, or cancels/aborts a
-        #           brew in progress.  (Without this, "brewing" would be a
-        #           dead end with both buttons greyed.)
+        # The rail buttons always work, with a single interlock:
+        #   BREW  - blocked only while the biohazard is showing (a stale pot
+        #           must be CLEANed first).  Otherwise always available --
+        #           pressing it (re)starts a brew and resets the clock.
+        #   CLEAN - always: clears the biohazard / resets to idle from any
+        #           state.  No "empty the pot first" gate.
         #   WEIGH - always
-        state = self.source_state()
         if self.mock:
             # No real state machine; keep everything live so the mock is usable.
             self._enable(self._brew_btn, True)
             self._enable(self._clean_btn, True)
             return
-        self._enable(self._brew_btn, state == "idle")
-        self._enable(self._clean_btn, state != "idle")
+        self._enable(self._brew_btn, not self._biohazard_showing())
+        self._enable(self._clean_btn, True)
 
     @staticmethod
     def _enable(btn, on):
@@ -1383,29 +1389,18 @@ class BrewcopApp(App):
         btn.opacity = 1.0 if on else 0.35
 
     def _rail_brew(self):
-        if self.source_state() != "idle":
+        # Blocked only by the biohazard; otherwise start/restart the brew.
+        if self._biohazard_showing():
             return
         self._go("home")
         self.source.start_brew(target_g=self.home._target_ml)
         self.home.tick()
 
     def _rail_clean(self):
-        state = self.source_state()
-        if state == "idle":
-            return
+        # Always clears to idle (drops the biohazard / any in-progress brew).
         self._go("home")
-        if state == "brewing":
-            # Abort a brew in progress -> back to idle (no empty-guard: there's
-            # no finished batch to protect).
-            self.source.clean_up()
-            self.home.tick()
-            return
-        # ready: can't wash a full pot -- require empty/absent first.
-        if self.home._pot.key in ("empty", "no_pot"):
-            self.source.clean_up()
-            self.home.tick()
-        else:
-            self.home._flash("Empty the pot first")
+        self.source.clean_up()
+        self.home.tick()
 
     def _go(self, name):
         self.sm.transition.direction = "right" if name == "home" else "left"
