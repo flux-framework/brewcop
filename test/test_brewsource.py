@@ -58,6 +58,20 @@ class FailingScale:
     weight = 0.0
 
 
+class ScriptedCurrentSensor:
+    """Fake current sensor with a fixed .amps (or one that raises)."""
+
+    def __init__(self, amps=12.5, raises=False):
+        self._amps = amps
+        self._raises = raises
+
+    @property
+    def amps(self):
+        if self._raises:
+            raise OSError("phidget boom")
+        return self._amps
+
+
 class FakePersist:
     """In-memory stand-in for the brewstate module."""
 
@@ -195,6 +209,43 @@ class TestScaleBrewSource(unittest.TestCase):
         # state settles once (unknown->present) then holds -> very few saves
         self.assertLessEqual(persist.saves, 2)
 
+    def test_amps_absent_without_sensor(self):
+        # No current sensor wired in -> amps is None (UI shows a blank).
+        sc = ScriptedScale([(795 + 900, True)])
+        src = brewsource.ScaleBrewSource(sc, SETTINGS)
+        self.assertIsNone(src.poll().amps)
+
+    def test_amps_rides_on_valid_result(self):
+        sc = ScriptedScale([(795 + 900, True)])
+        src = brewsource.ScaleBrewSource(
+            sc, SETTINGS, current_sensor=ScriptedCurrentSensor(amps=12.5)
+        )
+        r = src.poll()
+        self.assertTrue(r.valid)
+        self.assertAlmostEqual(r.amps, 12.5)
+
+    def test_amps_rides_on_moving_result(self):
+        # Current is a separate device from the scale, so a moving/invalid
+        # weight still carries a fresh current reading.
+        sc = ScriptedScale([(0.0, False)])
+        src = brewsource.ScaleBrewSource(
+            sc, SETTINGS, current_sensor=ScriptedCurrentSensor(amps=0.5)
+        )
+        r = src.poll()
+        self.assertFalse(r.valid)
+        self.assertTrue(r.moving)
+        self.assertAlmostEqual(r.amps, 0.5)
+
+    def test_sensor_error_is_swallowed(self):
+        # A sensor hiccup must not crash the tick; amps just comes back None.
+        sc = ScriptedScale([(795 + 900, True)])
+        src = brewsource.ScaleBrewSource(
+            sc, SETTINGS, current_sensor=ScriptedCurrentSensor(raises=True)
+        )
+        r = src.poll()  # must not raise
+        self.assertTrue(r.valid)
+        self.assertIsNone(r.amps)
+
 
 class TestMockBrewSource(unittest.TestCase):
     def test_cycles_states(self):
@@ -211,6 +262,17 @@ class TestMockBrewSource(unittest.TestCase):
         self.assertEqual(src.poll().pot_state.key, "stale")
         src.advance()  # wraps
         self.assertEqual(src.poll().pot_state.key, "no_pot")
+
+    def test_synthesizes_amps(self):
+        # --mock shows a live-looking current: brewing ~12.5 A, else idle.
+        states = [
+            potstate.PotState("brewing", "Brewing", fill=0.4),
+            potstate.PotState("fresh", "Fresh", fill=0.7),
+        ]
+        src = brewsource.MockBrewSource(states)
+        self.assertAlmostEqual(src.poll().amps, 12.5)  # brewing
+        src.advance()
+        self.assertAlmostEqual(src.poll().amps, 0.5)  # idle
 
 
 if __name__ == "__main__":

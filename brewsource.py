@@ -32,13 +32,20 @@ class PollResult:
     """What a source returns each tick."""
 
     def __init__(
-        self, pot_state, event=None, raw_grams=None, valid=False, moving=False
+        self,
+        pot_state,
+        event=None,
+        raw_grams=None,
+        valid=False,
+        moving=False,
+        amps=None,
     ):
         self.pot_state = pot_state  # potstate.PotState
         self.event = event  # "ready" or None
         self.raw_grams = raw_grams  # last raw scale reading (g) or None
         self.valid = valid  # was the last weight valid
         self.moving = moving  # scale in motion / reading not yet stable
+        self.amps = amps  # last boiler current reading (A) or None
 
 
 class ScaleBrewSource:
@@ -49,11 +56,16 @@ class ScaleBrewSource:
     (grams, pre-tare) -- i.e. scale.Scale or scale.NoScale.  `settings` is a
     mapping providing pot_tare_g, pot_capacity_ml, empty_thresh_g,
     stale_hours (the user settings; config is the single source of truth).
+    `current_sensor` (optional) is any object with an .amps property -- i.e.
+    currentsensor.CurrentSensor or NoCurrentSensor; None means no sensor.
     """
 
-    def __init__(self, scale, settings, tick_period=0.5, persist=None):
+    def __init__(
+        self, scale, settings, tick_period=0.5, persist=None, current_sensor=None
+    ):
         self._scale = scale
         self._settings = settings
+        self._current_sensor = current_sensor
         self._brains = Brains(
             tick_period=tick_period,
             empty_thresh=settings["empty_thresh_g"],
@@ -73,6 +85,16 @@ class ScaleBrewSource:
         # in motion (a bump, a pour).
         self._last_pot = potstate.PotState("no_pot", "No pot on scale", 0.0, False)
 
+    def _read_amps(self):
+        # Boiler current is a separate USB device from the scale, so read it
+        # independently and never let a sensor hiccup crash the tick.
+        if self._current_sensor is None:
+            return None
+        try:
+            return self._current_sensor.amps
+        except Exception:
+            return None
+
     def poll(self):
         # Read the scale (never let a serial hiccup crash the caller).
         try:
@@ -81,12 +103,19 @@ class ScaleBrewSource:
         except Exception:
             valid = False
 
+        amps = self._read_amps()
+
         if not valid:
             # Scale is moving / reading not yet stable.  Keep showing the last
             # good state rather than blanking, and flag that we're moving so
             # the UI can show a subtle "settling" indicator.
             return PollResult(
-                self._last_pot, event=None, raw_grams=None, valid=False, moving=True
+                self._last_pot,
+                event=None,
+                raw_grams=None,
+                valid=False,
+                moving=True,
+                amps=amps,
             )
 
         raw = self._scale.weight
@@ -120,7 +149,9 @@ class ScaleBrewSource:
             needs_clean=needs_clean,
         )
         self._last_pot = pot
-        return PollResult(pot, event=event, raw_grams=raw, valid=True, moving=False)
+        return PollResult(
+            pot, event=event, raw_grams=raw, valid=True, moving=False, amps=amps
+        )
 
     def start_brew(self, target_g):
         """BREW pressed: arm brewing toward target_g grams of contents."""
@@ -157,7 +188,11 @@ class MockBrewSource:
 
     def poll(self):
         st = self._states[self._i]
-        return PollResult(st, event=None, raw_grams=None, valid=True)
+        # Synthesize a plausible boiler current so --mock shows a live-looking
+        # readout: a brewing state draws ~12.5 A, everything else sits at the
+        # ~0.5 A idle standing current.
+        amps = 12.5 if st.key == "brewing" else 0.5
+        return PollResult(st, event=None, raw_grams=None, valid=True, amps=amps)
 
     def advance(self):
         """Move to the next mock state (e.g. on a screen tap)."""
