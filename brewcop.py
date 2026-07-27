@@ -83,6 +83,7 @@ import potstate
 import brewsource
 import brewstate
 from scale import open_scale, NoScale, POT_TOLERANCE_G
+from currentsensor import open_current_sensor, NoCurrentSensor
 from backlight import Backlight
 
 kivy.require("2.1.0")
@@ -789,8 +790,10 @@ class HomeScreen(Screen):
         center.add_widget(self.carafe)
         root.add_widget(center)
 
-        # Status row (full width, below the body): pot-status centered, live
-        # raw-weight readout to the right (swaps to "settling" while moving).
+        # Status row (full width, below the body): pot-status centered, with
+        # the raw sensor readouts stacked together on the right -- weight on
+        # top, live boiler current directly below it (one "source of truth"
+        # block rather than split across the row).
         statusbar = FloatLayout(size_hint_y=None, height=dp(40))
         self.status = Label(
             text="",
@@ -809,12 +812,26 @@ class HomeScreen(Screen):
             font_size=sp(16),
             halign="right",
             valign="middle",
-            size_hint=(None, 1),
-            width=dp(110),
-            pos_hint={"right": 1, "y": 0},
+            size_hint=(None, None),
+            size=(dp(110), dp(20)),
+            pos_hint={"right": 1, "top": 1},
         )
         self.weight_lbl.bind(size=lambda w, s: setattr(w, "text_size", s))
         statusbar.add_widget(self.weight_lbl)
+        # Boiler current (amps), directly below the weight (same right edge).
+        # Blank until the sensor gives a reading.
+        self.amps_lbl = Label(
+            text="",
+            color=MUTED,
+            font_size=sp(16),
+            halign="right",
+            valign="middle",
+            size_hint=(None, None),
+            size=(dp(110), dp(20)),
+            pos_hint={"right": 1, "y": 0},
+        )
+        self.amps_lbl.bind(size=lambda w, s: setattr(w, "text_size", s))
+        statusbar.add_widget(self.amps_lbl)
         root.add_widget(statusbar)
 
         # In --mock mode only, a strip to advance the canned states.
@@ -877,6 +894,10 @@ class HomeScreen(Screen):
         if result.raw_grams is not None:
             self._last_grams = result.raw_grams
         self.weight_lbl.text = "{:.0f} g".format(self._last_grams)
+        # Live boiler current beside the weight.  Blank when there's no sensor
+        # (NoCurrentSensor reads None) rather than showing a fake 0.
+        if result.amps is not None:
+            self.amps_lbl.text = "{:.1f} A".format(result.amps)
 
         # Notify + wake on the brewing->ready transition (app gates Slack).
         if result.event == "ready":
@@ -1290,6 +1311,7 @@ class BrewcopApp(App):
         # Scale + brew source.  --mock uses canned states and no hardware.
         if self.mock:
             self.scale = NoScale()
+            self.current_sensor = NoCurrentSensor()
             self.source = brewsource.MockBrewSource(mock_states())
         else:
             self.scale, err = open_scale(self.machine.serial_port)
@@ -1298,11 +1320,20 @@ class BrewcopApp(App):
                 print(
                     "scale: {} (running without hardware)".format(err), file=sys.stderr
                 )
+            # Boiler current sensor (i-Snail on a VINT hub).  Also non-fatal:
+            # NoCurrentSensor keeps the UI up, the current readout just blanks.
+            self.current_sensor, cerr = open_current_sensor()
+            if cerr:
+                print(
+                    "current sensor: {} (running without it)".format(cerr),
+                    file=sys.stderr,
+                )
             self.source = brewsource.ScaleBrewSource(
                 self.scale,
                 self.settings,
                 tick_period=TICK_PERIOD,
                 persist=brewstate,  # brew age survives reboots
+                current_sensor=self.current_sensor,
             )
 
         # Backlight (safe no-op if the sysfs node is absent/unwritable).
