@@ -14,32 +14,29 @@
 brewcop touchscreen app.
 
 A Kivy touchscreen coffee monitor for the Technivorm at B451.  Reads the
-Avery Berkel scale, interprets weight as brew activity, and shows a live
+Avery Berkel scale and an i-Snail clamp on the boiler, and shows a live
 carafe (level + freshness, with a blinking biohazard for a stale pot).
 
-Brewing is explicit, user-driven (no weight inference): the user sets the
-finished-pot level by dragging the dotted target line on the carafe, presses
-BREW, and the scale watches the level climb until it reaches that line; the
-batch ages until CLEAN UP.  If a brew stalls short, the user drags the line
-down to the level reached (dial-to-complete) -- no separate "mark ready".
+Brewing is detected automatically from boiler current (no BREW button, no
+weight inference): a sustained draw arms brewing, and the pour settling
+completes the batch to ready (see brains).  The batch then ages until the
+coffee is poured out.
 
-A fixed action rail (BREW / CLEAN / WEIGH) sits on the right of every screen;
-buttons enable/disable by brew state but never move.
+A fixed action rail (ZERO / WEIGH) sits on the right of every screen; the
+layout never moves, so the verbs are always in the same place.
 
 Screens (three total):
-  Home     -- Flux mark + wordmark, the live carafe with its draggable target
-              line, and a pot-status line.
+  Home     -- Flux mark + wordmark, the live carafe, and a pot-status line.
   Weigh    -- live scale weight, g/oz units toggle, tare, dosing hint, Back.
   Settings -- Slack on/off + steppers for tunable parameters (usersettings).
 
-Data comes from a brewsource: the real ScaleBrewSource (scale -> Brains ->
-potstate) in normal operation, or a MockBrewSource cycling canned states
-under --mock (tap the mock strip to advance).
+Data comes from a brewsource: the real ScaleBrewSource (scale + current ->
+Brains -> potstate) in normal operation, or a MockBrewSource cycling canned
+states under --mock (tap the mock strip to advance).
 
 Notifications: on a brew reaching ready we notify Slack ONLY IF the user
-setting slack_enabled is on (default OFF). Because brewing is now explicit,
-a "ready" only ever follows a deliberate BREW -- no more storms from pours
-or placements.
+setting slack_enabled is on (default OFF). Because ready follows a sensed
+boiler cycle with a settled pour, it no longer storms on pours or placements.
 
 Config: machine facts (serial port, webhook URL, location) come from
 machineconfig (read-only /etc/brewcop/config.toml); tweakable preferences
@@ -82,7 +79,7 @@ import usersettings
 import potstate
 import brewsource
 import brewstate
-from scale import open_scale, NoScale, POT_TOLERANCE_G
+from scale import open_scale, NoScale
 from currentsensor import open_current_sensor, NoCurrentSensor
 from backlight import Backlight
 
@@ -113,7 +110,7 @@ STEEL = (0.62, 0.66, 0.70, 1)  # brushed-steel carafe body
 
 # Settings/config live in dedicated modules now: user-tweakable preferences
 # in usersettings.UserSettings (writable JSON), machine facts in
-# machineconfig (read-only TOML).  POT_TOLERANCE_G comes from scale.
+# machineconfig (read-only TOML).
 
 
 # --- graphics helpers ----------------------------------------------------
@@ -192,32 +189,12 @@ class CarafeWidget(Widget):
         self._expired = False
         self._blink_on = True
         self._blink_ev = None
-        # Draggable brew-target line: a dotted line across the body at the
-        # target fill fraction, labeled in litres.  Shown when the app enables
-        # it (idle/brewing).  Dragging it sets the target; on_target(ml) is
-        # called back so the app can persist and act on it.
-        self._target_frac = 1.0  # 0..1 of the fillable body height
-        self._line_visible = False
-        self._dragging = False
-        self._capacity_ml = 1250  # for labeling the line (frac -> litres)
-        self.on_target = None  # callback(ml)
-        self._body = None  # geometry cached by _redraw for touch mapping
-        self._label = Label(
-            text="",
-            font_size=sp(15),
-            bold=True,
-            color=INK,
-            size_hint=(None, None),
-            halign="right",
-            valign="middle",
-        )
-        self._label.bind(size=lambda w, s: setattr(w, "text_size", s))
-        self.add_widget(self._label)
+        self._body = None  # geometry cached by _redraw
         # Age clock shown inside the body while coffee is fresh/aging (the
         # biohazard takes over once stale).
         self._age_text = ""
         self._age_s = None  # raw age seconds for the smiley clock (H:MM)
-        self._needs_clean = False  # persistent "press CLEAN" biohazard latch
+        self._needs_clean = False  # stale + coffee present -> biohazard
         self._brewing = False  # in-progress brew -> rain-cloud icon
         self._age_label = Label(
             text="",
@@ -254,74 +231,13 @@ class CarafeWidget(Widget):
         self._expired = expired  # current batch stale -> draw the body empty
         self._age_text = age_text  # shown inside the body while fresh/aging
         self._age_s = age_s  # raw seconds; drives the smiley clock (None=off)
-        self._needs_clean = needs_clean  # persistent latch -> biohazard nag
+        self._needs_clean = needs_clean  # stale + coffee present -> biohazard
         self._brewing = brewing  # in-progress brew -> rain-cloud icon
-        # The blink clock drives two animations: the biohazard "press CLEAN"
-        # reminder (blinks whenever the latch is set and a pot is present) and
-        # the brewing rain-cloud's falling drops.  Run it if either is active.
+        # The blink clock drives two animations: the biohazard reminder (blinks
+        # whenever a stale pot still has coffee in it) and the brewing
+        # rain-cloud's falling drops.  Run it if either is active.
         show_hazard = needs_clean and self._fill > 0.02
         self._set_blinking(show_hazard or brewing)
-        self._redraw()
-
-    def set_target_frac(self, frac):
-        """Set the target line position as a 0..1 body fraction (from mL)."""
-        self._target_frac = max(0.0, min(1.0, frac))
-        self._redraw()
-
-    def set_line_visible(self, visible):
-        """Show/hide the draggable target line (idle/brewing vs ready)."""
-        self._line_visible = visible
-        self._redraw()
-
-    def set_capacity_ml(self, capacity_ml):
-        """Full-pot capacity, used to label the target line in litres."""
-        self._capacity_ml = capacity_ml
-        self._redraw()
-
-    # --- target-line dragging -----------------------------------------
-    def _line_y(self):
-        b = self._body
-        return b["by"] + b["inset"] + b["fill_max"] * self._target_frac
-
-    def _y_to_frac(self, yy):
-        b = self._body
-        lo = b["by"] + b["inset"]
-        return max(0.0, min(1.0, (yy - lo) / b["fill_max"]))
-
-    def on_touch_down(self, touch):
-        if (
-            self._line_visible
-            and not self._expired
-            and self._body is not None
-            and self.collide_point(*touch.pos)
-            and abs(touch.y - self._line_y()) <= dp(28)
-        ):
-            self._dragging = True
-            touch.grab(self)
-            return True
-        return super().on_touch_down(touch)
-
-    def on_touch_move(self, touch):
-        if touch.grab_current is self and self._dragging:
-            self._commit_target(self._y_to_frac(touch.y))
-            return True
-        return super().on_touch_move(touch)
-
-    def on_touch_up(self, touch):
-        if touch.grab_current is self and self._dragging:
-            self._dragging = False
-            touch.ungrab(self)
-            # snap to 50 mL on release and notify
-            ml = round(self._target_frac * self._capacity_ml / 50.0) * 50
-            ml = max(250, min(self._capacity_ml, ml))
-            self._commit_target(ml / self._capacity_ml)
-            if self.on_target:
-                self.on_target(ml)
-            return True
-        return super().on_touch_up(touch)
-
-    def _commit_target(self, frac):
-        self._target_frac = max(0.0, min(1.0, frac))
         self._redraw()
 
     def _set_blinking(self, on):
@@ -475,74 +391,24 @@ class CarafeWidget(Widget):
                 ]
             )
 
-            # --- brew-target line: a dotted line at the target level that
-            # EXTENDS LEFT out past the pot, with the grab handle and label in
-            # the open area beside the carafe (readable against the dark bg,
-            # and an easy drag target away from the pot art). ---
-            if self._line_visible and not self._expired:
-                ly_line = by + inset + fill_max * self._target_frac
-                # body half-width at the line height (right end sits at body)
-                t = (ly_line - by) / body_h
-                hw_line = ((base_w - top_w) * (1 - t) + top_w) / 2
-                x_body_right = cx + hw_line
-                x_grab = x + dp(18)  # far-left end, out past the pot
-                Color(*INK)
-                seg = dp(10)
-                xx = x_grab + dp(12)  # line starts just right of the grabber
-                while xx < x_body_right:
-                    x2 = min(xx + seg, x_body_right)
-                    Line(points=[xx, ly_line, x2, ly_line], width=dp(1.5))
-                    xx += seg * 2  # gap
-                # yellow grab handle at the LEFT end (out past the pot)
-                Color(*ACCENT)
-                hs = dp(16)
-                RoundedRectangle(
-                    pos=(x_grab - hs / 2, ly_line - hs / 2),
-                    size=(hs, hs),
-                    radius=[dp(3)],
-                )
-
-        # Target label sits ABOVE the grab handle (in the open area left of the
-        # carafe), not beside it -- so a fingertip on the grabber while dragging
-        # never covers the reading.  Centered over the grabber, clamped so it
-        # can't run off the left screen edge, and always clear of the pot body.
-        if self._line_visible and not self._expired and self._body:
-            ly_line = by + inset + fill_max * self._target_frac
-            ml = self._target_frac * self._capacity_ml
-            self._label.text = "goal\n{:.0f} mL".format(ml)
-            self._label.halign = "center"
-            self._label.valign = "middle"
-            lw, lh = dp(100), dp(48)
-            self._label.size = (lw, lh)
-            x_grab = x + dp(18)  # matches the grab-handle center above
-            hs = dp(16)
-            lx = max(dp(4), x_grab - lw / 2)
-            # bottom of the label a small gap above the grabber's top edge
-            self._label.pos = (lx, ly_line + hs / 2 + dp(10))
-            self._label.opacity = 1
-        else:
-            self._label.opacity = 0
-
-        # Biohazard overlay: the persistent "press CLEAN" latch AND a pot is
-        # present (fill>0).  It is no longer tied to the current batch -- it
-        # blinks over a stale pot, an emptied-but-unwashed pot, OR a fresh new
-        # brew started before CLEAN was pressed, and only CLEAN clears it.
+        # Biohazard overlay: a stale batch with coffee still in the pot
+        # (needs_clean).  It is recomputed each tick, so it blinks over a stale
+        # pot and clears itself the moment the coffee is poured out.
         if self._needs_clean and self._fill > 0.02:
             body_cy = by + body_h * 0.42
             self._draw_hazard(cx, body_cy, min(top_w, base_w), body_h)
 
         # Brewing: a rain-cloud icon in the same spot (drops falling into the
-        # pot), so pressing BREW gives immediate feedback before the goal is
-        # reached.  Yields to the biohazard (persistent clean reminder) just
-        # like the smiley does.
+        # pot), giving immediate feedback the moment the boiler is sensed
+        # running.  Yields to the biohazard just like the smiley does.
         if self._brewing and not self._needs_clean:
             body_cy = by + body_h * 0.42
             self._draw_brewing(cx, body_cy, min(top_w, base_w), body_h)
 
         # Fresh/aging coffee: draw a smiley in the SAME spot the biohazard
         # would go (the happy counterpart to "gone bad").  Below it, an elapsed
-        # clock in H:MM.  The biohazard takes precedence: while a clean is
-        # pending, no smiley.
+        # clock in H:MM.  The biohazard takes precedence: while it is up (stale
+        # coffee still in the pot), no smiley.
         if self._age_text and not self._needs_clean:
             body_cy = by + body_h * 0.42
             self._draw_smiley(cx, body_cy, min(top_w, base_w), body_h)
@@ -770,13 +636,11 @@ class HomeScreen(Screen):
         top.add_widget(gear)
         root.add_widget(top)
 
-        # Carafe centerpiece.  The brew target is set by dragging the dotted
-        # line on the carafe itself (no separate dial); the BREW/CLEAN/WEIGH
-        # actions live in the app-level rail to the right of all screens.
+        # Carafe centerpiece.  Brewing is auto-detected from boiler current, so
+        # there is nothing to dial here; the ZERO/WEIGH actions live in the
+        # app-level rail to the right of all screens.
         center = FloatLayout()
         self.carafe = CarafeWidget(size_hint=(None, None))
-        self.carafe.on_target = self._on_target_dragged
-        self.carafe.set_capacity_ml(self.app.settings["pot_capacity_ml"])
 
         def _place_carafe(*_a):
             side = min(center.width * 0.62, center.height * 0.88)
@@ -849,26 +713,7 @@ class HomeScreen(Screen):
 
         self.add_widget(root)
         self._pot = potstate.PotState("no_pot", "", 0.0, False)
-        # Seed the target line from the persisted brew amount.
-        self._target_ml = self.app.settings["brew_target_ml"]
-        cap = self.app.settings["pot_capacity_ml"]
-        self.carafe.set_target_frac(self._target_ml / cap if cap else 1.0)
         self.tick()
-
-    def _on_target_dragged(self, ml):
-        # The carafe target line was dragged; persist the new brew amount.
-        self._target_ml = ml
-        self.app.settings["brew_target_ml"] = ml
-        self.app.settings.save()
-        # While BREWING, the line IS the finished-pot level, so moving it
-        # re-arms the target (use case A3: a stalled brew completes when you
-        # drag the line down to the level actually reached).  Re-arm brains and
-        # tick so the next poll can complete to ready.  Idle just sets the
-        # amount for the next BREW; a ready batch is left alone (re-arming would
-        # discard it).
-        if self.app.source_state() == "brewing":
-            self.app.source.start_brew(target_g=ml)
-            self.tick()
 
     def tick(self, *_a):
         """Poll the source, render, fire events."""
@@ -882,9 +727,6 @@ class HomeScreen(Screen):
 
         self._pot = pot
         self._render(pot)
-        # The target line is always shown (the carafe draw hides it only in the
-        # expired/biohazard state, where the target is moot).
-        self.carafe.set_line_visible(True)
         # Let the app refresh the rail's enabled/disabled buttons.
         self.app.refresh_rail()
         # Live weight readout beside the status line.  While the scale is
@@ -926,10 +768,10 @@ class HomeScreen(Screen):
         Clock.schedule_once(_end, seconds)
 
     def _render(self, pot):
-        # Two carafe signals: `expired` empties the body when the CURRENT batch
-        # is stale (stale coffee shouldn't look drinkable); `needs_clean` is the
-        # persistent "press CLEAN" latch that drives the biohazard reminder
-        # independently -- it stays lit into a fresh new brew until CLEAN.
+        # Two carafe signals: `expired` empties the body when the current batch
+        # is stale (stale coffee shouldn't look drinkable); `needs_clean` drives
+        # the biohazard reminder (stale + coffee still in the pot), recomputed
+        # each tick so it clears itself once the pot is emptied.
         expired = pot.expired
         # No persistent status text: the carafe (fill + smiley/clock +
         # biohazard) and the weight readout carry the state visually.  The
@@ -939,10 +781,10 @@ class HomeScreen(Screen):
             self.status.text = ""
 
         # Always draw the carafe (even with no pot on the scale it shows as an
-        # empty carafe -- the fixed frame the target line and fill relate to).
-        # While fresh/aging (and no clean pending) the carafe shows a smiley
-        # plus an H:MM clock once a minute has passed; age_text is just the
-        # on/off marker for that, age_s drives the clock.
+        # empty carafe -- the fixed frame the fill relates to).  While
+        # fresh/aging (and not stale) the carafe shows a smiley plus an H:MM
+        # clock once a minute has passed; age_text is just the on/off marker
+        # for that, age_s drives the clock.
         self.carafe.opacity = 1.0
         coffee = AMBER if pot.key == "aging" else GREEN
         age_text = pot.key if pot.key in ("fresh", "aging") else ""
@@ -955,8 +797,7 @@ class HomeScreen(Screen):
             needs_clean=pot.needs_clean,
             brewing=(pot.key == "brewing"),
         )
-        # Actions live in the app-level rail (BREW / CLEAN / WEIGH), enabled
-        # per state by App.refresh_rail(); nothing to do here.
+        # Actions live in the app-level rail (ZERO / WEIGH); nothing to do here.
 
 
 # --- Weigh ---------------------------------------------------------------
@@ -1222,31 +1063,9 @@ class SettingsScreen(Screen):
                 lambda v: "{:.1f} h".format(v),
             )
         )
-        tol = "+/- {} g".format(POT_TOLERANCE_G)
-        rows.add_widget(
-            StepperRow(
-                "Empty pot threshold",
-                config,
-                "empty_thresh_g",
-                0,
-                200,
-                1,
-                lambda v: "{:.0f} g".format(v),
-                note=tol,
-            )
-        )
-        rows.add_widget(
-            StepperRow(
-                "Pot tare (empty carafe)",
-                config,
-                "pot_tare_g",
-                700,
-                900,
-                1,
-                lambda v: "{:.0f} g".format(v),
-                note=tol,
-            )
-        )
+        # Pot tare and empty threshold are no longer tunable here: the ZERO
+        # button captures an accurate tare per brew (persisted), and the empty
+        # threshold is a fixed constant now that the tare is trustworthy.
         rows.add_widget(
             StepperRow(
                 "Pot capacity",
@@ -1346,11 +1165,10 @@ class BrewcopApp(App):
             Window.bind(on_key_down=self._on_key_down)
             Window.bind(on_touch_down=self._on_touch)
 
-        # Fixed action rail (BREW / CLEAN / WEIGH), present on every screen.
-        # Buttons enable/disable by brew state; the layout never moves, so the
-        # verbs are always in the same place (spatial muscle memory).  Built
-        # BEFORE the screens because HomeScreen's first tick() calls
-        # refresh_rail(), which touches these buttons.
+        # Fixed action rail (ZERO / WEIGH), present on every screen.  Brewing
+        # is auto-detected, so there is no BREW or CLEAN button; the two verbs
+        # never move (spatial muscle memory).  Built BEFORE the screens because
+        # HomeScreen's first tick() calls refresh_rail(), which touches these.
         rail = BoxLayout(
             orientation="vertical",
             spacing=dp(12),
@@ -1358,19 +1176,15 @@ class BrewcopApp(App):
             size_hint_x=None,
             width=dp(150),
         )
-        self._brew_btn = FlatButton(
-            text="BREW", bg=ACCENT, fg=(1, 1, 1, 1), font_size=sp(24), bold=True
-        )
-        self._brew_btn.bind(on_release=lambda *_a: self._rail_brew())
-        self._clean_btn = FlatButton(
-            text="CLEAN\nUP",
-            bg=HAZARD,
-            fg=(0.1, 0.1, 0.1, 1),
-            font_size=sp(22),
+        self._zero_btn = FlatButton(
+            text="ZERO\nEMPTY POT",
+            bg=ACCENT,
+            fg=(1, 1, 1, 1),
+            font_size=sp(20),
             bold=True,
             halign="center",
         )
-        self._clean_btn.bind(on_release=lambda *_a: self._rail_clean())
+        self._zero_btn.bind(on_release=lambda *_a: self._rail_zero())
         self._weigh_btn = FlatButton(
             text="WEIGH\nBEANS",
             bg=PANEL,
@@ -1380,7 +1194,7 @@ class BrewcopApp(App):
             halign="center",
         )
         self._weigh_btn.bind(on_release=lambda *_a: self._go("weigh"))
-        for b in (self._brew_btn, self._clean_btn, self._weigh_btn):
+        for b in (self._zero_btn, self._weigh_btn):
             rail.add_widget(b)
 
         # Screens (HomeScreen.tick() -> refresh_rail() needs the buttons above).
@@ -1457,57 +1271,38 @@ class BrewcopApp(App):
         self._reset_idle_timer()
         return False
 
-    def source_state(self):
-        # Brew state ("idle"/"brewing"/"ready") for enabling rail buttons.
-        # Mock has no state machine -> treat as idle.
-        brains = getattr(self.source, "_brains", None)
-        return brains.state if brains is not None else "idle"
-
     # --- action rail ---------------------------------------------------
     def refresh_rail(self):
-        # No weight interlocks.  The biohazard is a persistent "press CLEAN"
-        # reminder that rides along (even into a fresh brew) until CLEAN is
-        # pressed; we let the meatbags sort things out.
-        #   BREW  - always: (re)starts a brew and resets the clock; leaves any
-        #           pending needs-clean latch set (the biohazard stays up).
-        #   CLEAN - only when a clean is actually pending (the latch is set).
-        #           Otherwise it is a no-op / greyed, so an accidental press
-        #           can't wipe the age of good coffee -- the pot keeps aging.
+        # Both verbs are always available:
+        #   ZERO  - tare the empty carafe now on the scale + reset to idle.
+        #           Guarded (see _rail_zero): refused unless the scale looks
+        #           empty-pot-ish, so a press with coffee in the pot can't set
+        #           a wildly wrong tare.
         #   WEIGH - always.
-        self._enable(self._brew_btn, True)
-        self._enable(self._clean_btn, self.mock or self._clean_pending())
-
-    def _clean_pending(self):
-        # A clean is pending when the needs-clean latch is set (the same signal
-        # that drives the biohazard) -- not the drawn hazard, so CLEAN still
-        # works after the pot has been dumped (hazard gone, latch still set).
-        # HomeScreen.__init__ ticks (-> refresh_rail) before self.home is
-        # assigned in build(), so tolerate home/_pot not existing yet.
-        home = getattr(self, "home", None)
-        pot = getattr(home, "_pot", None) if home is not None else None
-        return bool(getattr(pot, "needs_clean", False))
+        self._enable(self._zero_btn, True)
 
     @staticmethod
     def _enable(btn, on):
         btn.disabled = not on
         btn.opacity = 1.0 if on else 0.35
 
-    def _rail_brew(self):
-        # Always start/restart the brew (resets the clock).  A pending
-        # needs-clean latch is intentionally left set -- the biohazard stays
-        # up over the fresh pot until someone presses CLEAN.
-        self._go("home")
-        self.source.start_brew(target_g=self.home._target_ml)
-        self.home.tick()
+    # Guard band (grams) around the current tare within which ZERO will accept
+    # the reading as "an empty pot".  Wide enough for a swapped carafe or a bit
+    # of residue, narrow enough to reject a pot with coffee still in it.
+    ZERO_GUARD_G = 150
 
-    def _rail_clean(self):
-        # No-op unless a clean is actually pending, so pressing CLEAN with good
-        # coffee in the pot leaves it aging untouched.  When pending, clear the
-        # latch and reset to idle.
-        if not (self.mock or self._clean_pending()):
-            return
+    def _rail_zero(self):
+        # Zero the empty pot: refuse unless the scale reading is close to the
+        # current tare (an actually-empty carafe), so we never tare away a
+        # potful of coffee.  On success, brewsource.zero() writes the new tare
+        # and resets to idle.
         self._go("home")
-        self.source.clean_up()
+        grams = getattr(self.home, "_last_grams", 0.0)
+        tare = self.settings["pot_tare_g"]
+        if not self.mock and abs(grams - tare) > self.ZERO_GUARD_G:
+            self.home._flash("Put the EMPTY pot on the scale to zero")
+            return
+        self.source.zero()
         self.home.tick()
 
     def _go(self, name):
