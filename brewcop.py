@@ -696,6 +696,35 @@ class HomeScreen(Screen):
         )
         self.amps_lbl.bind(size=lambda w, s: setattr(w, "text_size", s))
         statusbar.add_widget(self.amps_lbl)
+        # Left mirror of the right block: the stored pot tare on top and the
+        # live delta from it (net contents) below.  Same "source of truth"
+        # idea -- the tare the ZERO button would (or did) capture, and how far
+        # the scale is from it right now, so a greyed ZERO reads as "nothing to
+        # zero" rather than a dead button.
+        self.tare_lbl = Label(
+            text="",
+            color=MUTED,
+            font_size=sp(16),
+            halign="left",
+            valign="middle",
+            size_hint=(None, None),
+            size=(dp(110), dp(20)),
+            pos_hint={"x": 0, "top": 1},
+        )
+        self.tare_lbl.bind(size=lambda w, s: setattr(w, "text_size", s))
+        statusbar.add_widget(self.tare_lbl)
+        self.delta_lbl = Label(
+            text="",
+            color=MUTED,
+            font_size=sp(16),
+            halign="left",
+            valign="middle",
+            size_hint=(None, None),
+            size=(dp(110), dp(20)),
+            pos_hint={"x": 0, "y": 0},
+        )
+        self.delta_lbl.bind(size=lambda w, s: setattr(w, "text_size", s))
+        statusbar.add_widget(self.delta_lbl)
         root.add_widget(statusbar)
 
         # In --mock mode only, a strip to advance the canned states.
@@ -740,6 +769,10 @@ class HomeScreen(Screen):
         # (NoCurrentSensor reads None) rather than showing a fake 0.
         if result.amps is not None:
             self.amps_lbl.text = "{:.1f} A".format(result.amps)
+        # Left block: stored tare + live delta from it (mirrors weight/amps).
+        tare = self.app.settings["pot_tare_g"]
+        self.tare_lbl.text = "tare {:.0f} g".format(tare)
+        self.delta_lbl.text = "{:+.0f} g".format(self._last_grams - tare)
 
         # Notify + wake on the brewing->ready transition (app gates Slack).
         if result.event == "ready":
@@ -784,8 +817,9 @@ class HomeScreen(Screen):
         # empty carafe -- the fixed frame the fill relates to).  While
         # fresh/aging (and not stale) the carafe shows a smiley plus an H:MM
         # clock once a minute has passed; age_text is just the on/off marker
-        # for that, age_s drives the clock.
-        self.carafe.opacity = 1.0
+        # for that, age_s drives the clock.  With no pot on the scale, ghost
+        # the whole carafe back so it reads as absent, not present-and-empty.
+        self.carafe.opacity = 0.35 if pot.key == "no_pot" else 1.0
         coffee = AMBER if pot.key == "aging" else GREEN
         age_text = pot.key if pot.key in ("fresh", "aging") else ""
         self.carafe.set_state(
@@ -1194,7 +1228,8 @@ class BrewcopApp(App):
             halign="center",
         )
         self._weigh_btn.bind(on_release=lambda *_a: self._go("weigh"))
-        for b in (self._zero_btn, self._weigh_btn):
+        # WEIGH on top (the everyday verb), ZERO below it (occasional setup).
+        for b in (self._weigh_btn, self._zero_btn):
             rail.add_widget(b)
 
         # Screens (HomeScreen.tick() -> refresh_rail() needs the buttons above).
@@ -1273,13 +1308,25 @@ class BrewcopApp(App):
 
     # --- action rail ---------------------------------------------------
     def refresh_rail(self):
-        # Both verbs are always available:
-        #   ZERO  - tare the empty carafe now on the scale + reset to idle.
-        #           Guarded (see _rail_zero): refused unless the scale looks
-        #           empty-pot-ish, so a press with coffee in the pot can't set
-        #           a wildly wrong tare.
-        #   WEIGH - always.
-        self._enable(self._zero_btn, True)
+        # WEIGH is always live.  ZERO is only enabled when it would actually do
+        # something: an empty-ish pot is on the scale (within ZERO_GUARD_G of
+        # the stored tare, so not a potful of coffee) AND it differs from that
+        # tare by more than ZERO_DEADBAND_G (else there's nothing to capture --
+        # it's already zeroed).  Greying it there is the missing feedback: with
+        # the pot at tare, off the scale, or full of coffee, the button dims
+        # and the left-side delta readout says why.  Mock keeps it live so the
+        # demo can always exercise it.
+        self._enable(self._weigh_btn, True)
+        self._enable(self._zero_btn, self.mock or self._zero_useful())
+
+    def _zero_useful(self):
+        # HomeScreen.__init__ ticks (-> refresh_rail) before self.home exists,
+        # so tolerate a missing home / first reading.
+        home = getattr(self, "home", None)
+        if home is None:
+            return False
+        delta = abs(getattr(home, "_last_grams", 0.0) - self.settings["pot_tare_g"])
+        return self.ZERO_DEADBAND_G < delta <= self.ZERO_GUARD_G
 
     @staticmethod
     def _enable(btn, on):
@@ -1290,6 +1337,9 @@ class BrewcopApp(App):
     # the reading as "an empty pot".  Wide enough for a swapped carafe or a bit
     # of residue, narrow enough to reject a pot with coffee still in it.
     ZERO_GUARD_G = 150
+    # Below this delta from the stored tare there's nothing worth re-zeroing --
+    # the pot already matches the tare, so ZERO greys out.
+    ZERO_DEADBAND_G = 10
 
     def _rail_zero(self):
         # Zero the empty pot: refuse unless the scale reading is close to the
