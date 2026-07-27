@@ -25,9 +25,11 @@ import potstate  # noqa: E402
 SETTINGS = {
     "pot_tare_g": 795,
     "pot_capacity_ml": 1250,
-    "empty_thresh_g": 50,
     "stale_hours": 4.0,
 }
+
+BREW_A = 12.5  # boiler running
+IDLE_A = 0.5  # boiler off
 
 
 class ScriptedScale:
@@ -59,17 +61,18 @@ class FailingScale:
 
 
 class ScriptedCurrentSensor:
-    """Fake current sensor with a fixed .amps (or one that raises)."""
+    """Fake current sensor.  `.amps` is settable so a test can turn the boiler
+    on/off across polls; `raises=True` simulates a hardware hiccup."""
 
     def __init__(self, amps=12.5, raises=False):
-        self._amps = amps
+        self.amps_value = amps
         self._raises = raises
 
     @property
     def amps(self):
         if self._raises:
             raise OSError("phidget boom")
-        return self._amps
+        return self.amps_value
 
 
 class FakePersist:
@@ -144,47 +147,67 @@ class TestScaleBrewSource(unittest.TestCase):
         self.assertTrue(all(e is None for e in events))
         self.assertEqual(src.poll().pot_state.key, "present")
 
-    def test_brew_cycle(self):
-        # start_brew -> filling stays "brewing" -> reaching the dialed target
-        # level emits ready
-        sc = ScriptedScale([(795 + 300, True), (795 + 1200, True)])
-        src = brewsource.ScaleBrewSource(sc, SETTINGS)
-        src.start_brew(target_g=1200)  # finished-pot level
-        r1 = src.poll()  # 300 g contents, under target
-        self.assertEqual(r1.pot_state.key, "brewing")
-        self.assertIsNone(r1.event)
-        r2 = src.poll()  # 1200 g contents == target
-        self.assertEqual(r2.event, "ready")
-        self.assertIn(r2.pot_state.key, ("fresh", "aging"))
-        # clean up -> back to idle; a full pot now reads "present"
-        src.clean_up()
-        r3 = src.poll()
-        self.assertEqual(r3.pot_state.key, "present")
+    def test_brew_cycle_auto_detected(self):
+        # Boiler current drives the whole cycle -- no BREW button.  A sustained
+        # draw arms brewing; boiler-off + a settled pour completes to ready.
+        import brains
 
-    def test_needs_clean_latch_survives_rebrew(self):
-        # A batch goes stale (needs_clean latched via the pot_state), then a
-        # NEW brew is started without cleaning: the fresh pot still carries the
-        # biohazard reminder (needs_clean stays True until clean_up()).
+        clock = [1000.0]
+        cur = ScriptedCurrentSensor(amps=BREW_A)
+        sc = ScriptedScale([(795 + 1200, True)] * 6)
+        src = brewsource.ScaleBrewSource(sc, SETTINGS, current_sensor=cur)
+        src._brains._now = lambda: clock[0]  # injectable clock
+        r1 = src.poll()  # boiler just came on; debounce not yet met
+        self.assertEqual(r1.pot_state.key, "present")
+        clock[0] += brains.BREW_ON_DEBOUNCE_S + 1
+        r2 = src.poll()  # sustained -> brewing
+        self.assertEqual(r2.pot_state.key, "brewing")
+        cur.amps_value = IDLE_A  # boiler off, pour settling
+        src.poll()
+        clock[0] += brains.SETTLE_WINDOW_S + 1
+        r3 = src.poll()  # settled -> ready
+        self.assertEqual(r3.event, "ready")
+        self.assertIn(r3.pot_state.key, ("fresh", "aging"))
+
+    def test_biohazard_clears_when_pot_emptied(self):
+        # A ready batch goes stale (biohazard up), then the coffee is poured
+        # out: the nag clears on its own -- no CLEAN button -- because the
+        # biohazard is now `stale AND coffee present`, recomputed each tick.
+        import brains
+
         cfg = dict(SETTINGS, stale_hours=4.0)
         clock = [1000.0]
-        sc = ScriptedScale([(795 + 1200, True)] * 8)
-        src = brewsource.ScaleBrewSource(sc, cfg)
-        src._brains._now = lambda: clock[0]  # injectable clock
-        src.start_brew(target_g=1200)
-        src.poll()  # -> ready at t=1000
-        clock[0] += 4 * 3600 + 10  # age past the stale window
+        cur = ScriptedCurrentSensor(amps=BREW_A)
+        # Full pot through the brew + stale, then an empty carafe (at tare).
+        sc = ScriptedScale(
+            [(795 + 1200, True)] * 5 + [(795, True)]
+        )
+        src = brewsource.ScaleBrewSource(sc, cfg, current_sensor=cur)
+        src._brains._now = lambda: clock[0]
+        src.poll()  # boiler on
+        clock[0] += brains.BREW_ON_DEBOUNCE_S + 1
+        src.poll()  # brewing
+        cur.amps_value = IDLE_A
+        src.poll()  # boiler off, settling
+        clock[0] += brains.SETTLE_WINDOW_S + 1
+        src.poll()  # ready
+        clock[0] += 4 * 3600 + 10  # age past stale
+        r = src.poll()  # still full -> stale + biohazard
+        self.assertEqual(r.pot_state.key, "stale")
+        self.assertTrue(r.pot_state.needs_clean)
+        r2 = src.poll()  # coffee poured out (carafe at tare)
+        self.assertEqual(r2.pot_state.key, "empty")
+        self.assertFalse(r2.pot_state.needs_clean)
+
+    def test_zero_tares_and_resets(self):
+        # Zero-empty-pot: writes the current weight as the new tare and returns
+        # to idle.  A carafe that weighs differently now reads "empty" (0 net).
+        sc = ScriptedScale([(812, True)])  # heavier carafe than the 795 default
+        src = brewsource.ScaleBrewSource(sc, dict(SETTINGS))
+        src.zero()
+        self.assertEqual(src._settings["pot_tare_g"], 812)
         r = src.poll()
-        self.assertTrue(r.pot_state.needs_clean)  # latched
-        # brew again WITHOUT cleaning -> still filling (target above current),
-        # but the nag persists over the fresh pot
-        src.start_brew(target_g=2000)
-        r2 = src.poll()
-        self.assertEqual(r2.pot_state.key, "brewing")
-        self.assertTrue(r2.pot_state.needs_clean)
-        # CLEAN clears it
-        src.clean_up()
-        r3 = src.poll()
-        self.assertFalse(r3.pot_state.needs_clean)
+        self.assertEqual(r.pot_state.key, "empty")
 
     def test_restores_persisted_ready_state(self):
         # A saved "ready" snapshot from a prior run is restored on init, so a

@@ -54,10 +54,11 @@ class ScaleBrewSource:
 
     `scale` is any object with .poll(), .weight_is_valid, and .weight
     (grams, pre-tare) -- i.e. scale.Scale or scale.NoScale.  `settings` is a
-    mapping providing pot_tare_g, pot_capacity_ml, empty_thresh_g,
-    stale_hours (the user settings; config is the single source of truth).
-    `current_sensor` (optional) is any object with an .amps property -- i.e.
+    mapping providing pot_tare_g, pot_capacity_ml, stale_hours (the user
+    settings; config is the single source of truth).  `current_sensor`
+    (optional) is any object with an .amps property -- i.e.
     currentsensor.CurrentSensor or NoCurrentSensor; None means no sensor.
+    Brewing is detected from boiler current, so no BREW button is needed.
     """
 
     def __init__(
@@ -66,10 +67,7 @@ class ScaleBrewSource:
         self._scale = scale
         self._settings = settings
         self._current_sensor = current_sensor
-        self._brains = Brains(
-            tick_period=tick_period,
-            empty_thresh=settings["empty_thresh_g"],
-        )
+        self._brains = Brains()
         # Optional persistence module (brewstate) so the brew age survives
         # reboots.  Restore any saved snapshot, and remember it so we only
         # write back when the durable state actually changes.
@@ -106,12 +104,16 @@ class ScaleBrewSource:
         amps = self._read_amps()
 
         if not valid:
-            # Scale is moving / reading not yet stable.  Keep showing the last
-            # good state rather than blanking, and flag that we're moving so
-            # the UI can show a subtle "settling" indicator.
+            # Scale is moving / reading not yet stable.  The current sensor is
+            # a separate device, so still feed Brains the fresh amps (net None
+            # -> weight-settle can't run, but boiler on/off still tracks).
+            event = self._brains.store(None, amps=amps)
+            self._maybe_persist()
+            # Keep showing the last good state rather than blanking, and flag
+            # that we're moving so the UI can show a "settling" indicator.
             return PollResult(
                 self._last_pot,
-                event=None,
+                event=event,
                 raw_grams=None,
                 valid=False,
                 moving=True,
@@ -120,23 +122,18 @@ class ScaleBrewSource:
 
         raw = self._scale.weight
 
-        # Feed Brains the *contents* weight (net of tare, tolerance applied),
-        # matching how the original code stored w = weight - tare.  Brains
-        # only cares about relative change + empty thresh.
+        # Feed Brains the *contents* weight (net of tare, tolerance applied)
+        # plus the boiler current.  Current drives the brew lifecycle; weight
+        # drives ready-detection (the pour settling) and the fill level.
         net = potstate.net_contents_g(raw, self._settings["pot_tare_g"])
-        event = self._brains.store(net)
+        event = self._brains.store(net, amps=amps)
 
         stale_s = float(self._settings["stale_hours"]) * 3600.0
-        # Two orthogonal signals:
-        #  - is_stale(): the CURRENT ready batch is itself stale -> draw the pot
-        #    empty (stale coffee shouldn't look drinkable).  Goes False again
-        #    once a new brew starts.
-        #  - update_dirty(): a persistent "press CLEAN" latch, set once any
-        #    batch goes stale and cleared ONLY by CLEAN.  It survives into the
-        #    next brew, so the biohazard stays up as a reminder even over a
-        #    fresh pot.  The meatbags decide when to deal with it.
+        # The current ready batch is itself stale -> draw the pot empty (stale
+        # coffee shouldn't look drinkable).  The biohazard is no longer a
+        # latch: derive() recomputes it each tick from state + age + contents,
+        # so it clears on its own once the pot is emptied.
         current_stale = self._brains.is_stale(stale_s)
-        needs_clean = self._brains.update_dirty(stale_s)
         self._maybe_persist()
 
         pot = potstate.derive(
@@ -145,22 +142,28 @@ class ScaleBrewSource:
             brew_state=self._brains.state,
             elapsed_s=self._brains.elapsed(),
             config=self._settings,
-            dirty=current_stale,
-            needs_clean=needs_clean,
+            stale=current_stale,
         )
         self._last_pot = pot
         return PollResult(
             pot, event=event, raw_grams=raw, valid=True, moving=False, amps=amps
         )
 
-    def start_brew(self, target_g):
-        """BREW pressed: arm brewing toward target_g grams of contents."""
-        self._brains.start_brew(target_g)
-        self._maybe_persist()
-
-    def clean_up(self):
-        """CLEAN UP pressed: batch dealt with, return to idle."""
-        self._brains.clean_up()
+    def zero(self):
+        """Zero-empty-pot pressed: tare the empty carafe now on the scale and
+        return to a clean idle.  Persists the tare so it survives reboots (the
+        button is a convenience, not a requirement -- an accurate tare rides
+        from the last press)."""
+        raw = None
+        try:
+            self._scale.poll()
+            if self._scale.weight_is_valid:
+                raw = self._scale.weight
+        except Exception:
+            raw = None
+        if raw is not None:
+            self._settings["pot_tare_g"] = raw
+        self._brains.reset()
         self._maybe_persist()
 
     def _maybe_persist(self):
@@ -199,10 +202,7 @@ class MockBrewSource:
         self._i = (self._i + 1) % len(self._states)
 
     # Transition methods are no-ops in mock (states are canned + cycled).
-    def start_brew(self, target_g):
-        pass
-
-    def clean_up(self):
+    def zero(self):
         pass
 
 

@@ -11,11 +11,13 @@
 #############################################################
 
 """
-Tests for brains.Brains: the explicit, user-driven brew state machine.
+Tests for brains.Brains: the current-driven brew state machine.
 
-Weight is fed as CONTENTS grams (net of pot tare).  Transitions are driven by
-start_brew / clean_up, plus weight reaching the dialed target while brewing.
-An injectable clock makes ages deterministic.
+Each tick feeds store(net, amps): contents grams (net of pot tare, or None
+when the scale read is invalid) and boiler current in amps (or None with no
+sensor).  Transitions are driven by boiler current -- a sustained draw arms
+brewing; boiler-off plus a settled pour completes to ready.  An injectable
+clock makes the debounce, settle window, and ages deterministic.
 """
 
 import os
@@ -25,6 +27,10 @@ import unittest
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 
 import brains  # noqa: E402
+
+
+BREW_A = 12.5  # a running boiler
+IDLE_A = 0.5  # boiler off, standing current
 
 
 class FakeClock:
@@ -38,9 +44,23 @@ class FakeClock:
         self.t += dt
 
 
-def make(empty_thresh=50):
+def make():
     clk = FakeClock()
-    return brains.Brains(empty_thresh=empty_thresh, now=clk), clk
+    return brains.Brains(now=clk), clk
+
+
+def arm_brewing(b, clk, net=300):
+    """Drive idle -> brewing: boiler on, then past the debounce."""
+    b.store(net, amps=BREW_A)
+    clk.advance(brains.BREW_ON_DEBOUNCE_S + 1)
+    b.store(net, amps=BREW_A)
+
+
+def finish_brew(b, clk, net=1250):
+    """Drive brewing -> ready: boiler off, pour steady past the settle window."""
+    b.store(net, amps=IDLE_A)  # boiler off, start settling
+    clk.advance(brains.SETTLE_WINDOW_S + 1)
+    return b.store(net, amps=IDLE_A)
 
 
 class TestBrains(unittest.TestCase):
@@ -48,73 +68,149 @@ class TestBrains(unittest.TestCase):
         b, _ = make()
         self.assertEqual(b.state, "idle")
 
-    def test_brew_completes_at_target_level(self):
-        # target_g is the finished-pot level -> exact match (within noise),
-        # NO absorption margin.  Under-target stays brewing.
+    def test_boiler_blip_does_not_arm(self):
+        # A brief boiler pulse shorter than the debounce must not start a brew.
         b, clk = make()
-        b.start_brew(target_g=1250)
-        self.assertEqual(b.state, "brewing")
-        self.assertIsNone(b.store(300))  # partial
-        self.assertEqual(b.state, "brewing")
-        self.assertIsNone(b.store(1100))  # still short of target
-        self.assertEqual(b.state, "brewing")
-        event = b.store(1250)  # reaches the dialed finished level
-        self.assertEqual(event, "ready")
-        self.assertEqual(b.state, "ready")
-
-    def test_dribble_without_brew_does_nothing(self):
-        # weight appearing while IDLE is never a brew (no inference)
-        b, clk = make()
-        for w in (100, 400, 900, 1200):
-            event = b.store(w)
-            self.assertIsNone(event)
+        b.store(300, amps=BREW_A)
+        clk.advance(brains.BREW_ON_DEBOUNCE_S - 1)
+        b.store(300, amps=IDLE_A)  # dropped before the debounce elapsed
         self.assertEqual(b.state, "idle")
 
-    def test_dial_down_to_complete_a_short_brew(self):
-        # a brew that stalls below the dialed level completes when the user
-        # dials the target down to the level actually reached
+    def test_sustained_boiler_arms_brewing(self):
         b, clk = make()
-        b.start_brew(target_g=1250)
-        b.store(1050)  # stalled short
+        b.store(300, amps=BREW_A)
+        self.assertEqual(b.state, "idle")  # not yet past debounce
+        clk.advance(brains.BREW_ON_DEBOUNCE_S + 1)
+        b.store(320, amps=BREW_A)
         self.assertEqual(b.state, "brewing")
-        b.start_brew(target_g=1050)  # re-arm at the reached level
-        event = b.store(1050)
+
+    def test_brew_completes_on_settled_pour(self):
+        # After boiler-off, a pour that stops climbing for the settle window
+        # completes to ready.
+        b, clk = make()
+        arm_brewing(b, clk, net=300)
+        # Boiler off, but coffee still dripping in -> stays brewing.
+        b.store(800, amps=IDLE_A)
+        self.assertEqual(b.state, "brewing")
+        clk.advance(10)
+        b.store(1200, amps=IDLE_A)  # still climbing -> resets settle window
+        self.assertEqual(b.state, "brewing")
+        # Now steady (within the settle epsilon) for the full window -> ready.
+        clk.advance(brains.SETTLE_WINDOW_S + 1)
+        event = b.store(1202, amps=IDLE_A)
         self.assertEqual(event, "ready")
         self.assertEqual(b.state, "ready")
 
-    def test_clean_up_returns_to_idle(self):
+    def test_climbing_resets_settle_window(self):
+        # The drip tail: weight creeping up beyond the epsilon keeps restarting
+        # the window, so we don't call ready mid-pour.
         b, clk = make()
-        b.start_brew(target_g=1250)
-        b.store(1250)  # -> ready
+        arm_brewing(b, clk, net=300)
+        net = 600
+        b.store(net, amps=IDLE_A)  # boiler off
+        for _ in range(3):  # keeps climbing each near-window
+            clk.advance(brains.SETTLE_WINDOW_S - 1)
+            net += 200
+            last = b.store(net, amps=IDLE_A)
+            self.assertIsNone(last)
+            self.assertEqual(b.state, "brewing")
+
+    def test_still_heating_does_not_settle(self):
+        # Boiler still drawing current -> never begins the settle countdown.
+        b, clk = make()
+        arm_brewing(b, clk, net=300)
+        clk.advance(brains.SETTLE_WINDOW_S + 5)
+        self.assertIsNone(b.store(1200, amps=BREW_A))  # still on
+        self.assertEqual(b.state, "brewing")
+
+    def test_no_sensor_never_leaves_idle(self):
+        # amps None (no current sensor) -> boiler never reads "on", so weight
+        # alone never arms a brew.  Safe degradation: pot just shows present.
+        b, clk = make()
+        for w in (100, 400, 900, 1200):
+            clk.advance(30)
+            self.assertIsNone(b.store(w, amps=None))
+        self.assertEqual(b.state, "idle")
+
+    def test_no_scale_settles_on_fallback_timer(self):
+        # net None (no scale): can't watch weight, so ready fires a fixed spell
+        # after boiler-off.
+        b, clk = make()
+        b.store(None, amps=BREW_A)
+        clk.advance(brains.BREW_ON_DEBOUNCE_S + 1)
+        b.store(None, amps=BREW_A)
+        self.assertEqual(b.state, "brewing")
+        b.store(None, amps=IDLE_A)  # boiler off
+        clk.advance(brains.SETTLE_FALLBACK_S + 1)
+        self.assertEqual(b.store(None, amps=IDLE_A), "ready")
+
+    def test_ready_time_is_settle_not_boiler_off(self):
+        # Freshness clock starts when the pour settles, not when the boiler
+        # cut out -- the drip tail shouldn't count against the coffee's age.
+        b, clk = make()
+        arm_brewing(b, clk, net=300)
+        b.store(1200, amps=IDLE_A)  # boiler off here
+        clk.advance(brains.SETTLE_WINDOW_S + 1)
+        settle_t = clk.t
+        b.store(1200, amps=IDLE_A)  # ready fires now
+        self.assertEqual(b.ready_time, settle_t)
+
+    def test_rebrew_from_ready_without_zeroing(self):
+        # Pouring out an old batch and starting a fresh brew without pressing
+        # Zero must still re-arm brewing -- the boiler tells us, so the cycle
+        # doesn't get stuck in ready.
+        b, clk = make()
+        arm_brewing(b, clk)
+        finish_brew(b, clk)
         self.assertEqual(b.state, "ready")
-        b.clean_up()
+        b.store(300, amps=BREW_A)  # boiler fires again
+        clk.advance(brains.BREW_ON_DEBOUNCE_S + 1)
+        b.store(320, amps=BREW_A)
+        self.assertEqual(b.state, "brewing")
+        self.assertIsNone(b.ready_time)  # old batch's age cleared
+
+    def test_reset_returns_to_idle(self):
+        b, clk = make()
+        arm_brewing(b, clk)
+        finish_brew(b, clk)
+        self.assertEqual(b.state, "ready")
+        b.reset()
         self.assertEqual(b.state, "idle")
         self.assertIsNone(b.ready_time)
 
+    def test_reset_disarms_boiler_tracking(self):
+        # After reset, a still-hot boiler reading shouldn't instantly re-arm:
+        # the debounce restarts from the reset.
+        b, clk = make()
+        arm_brewing(b, clk)
+        b.reset()
+        b.store(300, amps=BREW_A)  # boiler still on right after reset
+        self.assertEqual(b.state, "idle")  # debounce restarts, not armed yet
+
     def test_age_ticks_while_ready(self):
         b, clk = make()
-        b.start_brew(target_g=1250)
-        b.store(1250)  # ready
+        arm_brewing(b, clk)
+        finish_brew(b, clk)
         clk.advance(42)
         self.assertAlmostEqual(b.elapsed(), 42)
 
     def test_age_persists_while_pot_absent(self):
-        # ready pot carried away (net drops) keeps its age; state stays ready
-        # (user-driven -- removal is not a transition)
+        # A ready pot carried away (net drops, then invalid) keeps its age;
+        # removal is not a transition.
         b, clk = make()
-        b.start_brew(target_g=1250)
-        b.store(1250)  # ready
+        arm_brewing(b, clk)
+        finish_brew(b, clk)
         rt = b.ready_time
         clk.advance(1800)
-        b.store(-800)  # pot off the scale
+        b.store(None, amps=IDLE_A)  # pot off the scale
         self.assertEqual(b.state, "ready")
         self.assertEqual(b.ready_time, rt)
         self.assertGreaterEqual(b.elapsed(), 1800)
 
     def test_is_stale(self):
         b, clk = make()
-        b.start_brew(target_g=1250)
-        b.store(1250)  # ready
+        arm_brewing(b, clk)
+        finish_brew(b, clk)
         stale = 4 * 3600
         self.assertFalse(b.is_stale(stale))
         clk.advance(stale + 10)
@@ -124,96 +220,39 @@ class TestBrains(unittest.TestCase):
         b, clk = make()
         stale = 4 * 3600
         self.assertFalse(b.is_stale(stale))  # idle
-        b.start_brew(target_g=1250)
+        arm_brewing(b, clk)
         clk.advance(stale + 10)
         self.assertFalse(b.is_stale(stale))  # brewing, not ready
-
-    def test_no_notify_on_placement_while_idle(self):
-        # a full pot set down while idle does not fire "ready"
-        b, clk = make()
-        event = b.store(1300)
-        self.assertIsNone(event)
-        self.assertEqual(b.state, "idle")
-
-    def test_dirty_latch_sets_when_stale(self):
-        b, clk = make()
-        stale = 4 * 3600
-        b.start_brew(target_g=1250)
-        b.store(1250)  # ready
-        self.assertFalse(b.update_dirty(stale))  # fresh
-        clk.advance(stale + 10)
-        self.assertTrue(b.update_dirty(stale))  # latched
-        self.assertTrue(b.dirty)
-
-    def test_dirty_latch_survives_new_brew(self):
-        # The needs-clean latch persists through a fresh brew: only CLEAN
-        # clears it, so the biohazard stays up as a reminder over the new pot.
-        b, clk = make()
-        stale = 4 * 3600
-        b.start_brew(target_g=1250)
-        b.store(1250)
-        clk.advance(stale + 10)
-        b.update_dirty(stale)
-        self.assertTrue(b.dirty)
-        b.start_brew(target_g=1000)  # brew again WITHOUT cleaning
-        self.assertEqual(b.state, "brewing")
-        self.assertTrue(b.dirty)  # still latched
-        b.store(1000)  # new pot becomes ready
-        self.assertTrue(b.dirty)  # STILL latched (fresh pot, but nag remains)
-
-    def test_dirty_latch_cleared_only_by_clean_up(self):
-        b, clk = make()
-        stale = 4 * 3600
-        b.start_brew(target_g=1250)
-        b.store(1250)
-        clk.advance(stale + 10)
-        b.update_dirty(stale)
-        self.assertTrue(b.dirty)
-        b.clean_up()
-        self.assertFalse(b.dirty)  # CLEAN is the only thing that clears it
 
 
 class TestPersistence(unittest.TestCase):
     def test_snapshot_restore_preserves_ready_age(self):
         b, clk = make()
-        b.start_brew(target_g=1250)
-        b.store(1250)  # ready
+        arm_brewing(b, clk)
+        finish_brew(b, clk)
         snap = b.snapshot()
         clk.advance(3600)  # an hour (incl. any downtime)
-        b2 = brains.Brains(empty_thresh=50, now=clk)
+        b2 = brains.Brains(now=clk)
         b2.restore(snap)
         self.assertEqual(b2.state, "ready")
         self.assertGreater(b2.elapsed(), 3600 - 5)
 
     def test_snapshot_restore_resumes_brewing(self):
         b, clk = make()
-        b.start_brew(target_g=1250)
+        arm_brewing(b, clk)
         snap = b.snapshot()
-        b2 = brains.Brains(empty_thresh=50, now=clk)
+        b2 = brains.Brains(now=clk)
         b2.restore(snap)
         self.assertEqual(b2.state, "brewing")
-        self.assertEqual(b2.target_g, 1250)
-        # still completes at target after restore
-        self.assertEqual(b2.store(1250), "ready")
+        # A settled pour after restore still completes to ready.
+        b2.store(1250, amps=IDLE_A)
+        clk.advance(brains.SETTLE_WINDOW_S + 1)
+        self.assertEqual(b2.store(1250, amps=IDLE_A), "ready")
 
     def test_restore_none_is_noop(self):
         b, _ = make()
         b.restore(None)
         self.assertEqual(b.state, "idle")
-
-    def test_snapshot_restore_preserves_dirty_latch(self):
-        # a needs-clean pot that reboots must come back still dirty (the
-        # biohazard reminder should survive a power cycle until CLEAN)
-        b, clk = make()
-        stale = 4 * 3600
-        b.start_brew(target_g=1250)
-        b.store(1250)
-        clk.advance(stale + 10)
-        b.update_dirty(stale)
-        snap = b.snapshot()
-        b2 = brains.Brains(empty_thresh=50, now=clk)
-        b2.restore(snap)
-        self.assertTrue(b2.dirty)
 
 
 if __name__ == "__main__":

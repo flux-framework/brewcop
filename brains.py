@@ -11,35 +11,39 @@
 #############################################################
 
 """
-Brew state machine -- explicit, user-driven.
+Brew state machine -- driven by boiler current, not user intent.
 
-Inferring the brew cycle from scale weight alone was never reliable (a
-dribble or a placed object looked like a brew; the rate thresholds were
-guesses).  Every such bug came from trying to infer the user's *intent* from
-weight.  So intent is now explicit -- the user drives the transitions -- and
-the scale is used only for what it is reliable at: measuring.
+Earlier designs inferred the brew cycle from scale weight alone (unreliable:
+a dribble or a placed object looked like a brew) and then, when that failed,
+made the user press BREW to declare intent.  With an i-Snail clamp on the
+Moccamaster boiler we now sense brewing *directly*: the boiler draws a
+sustained ~12.5 A while heating and ~0.5 A idle.  So the machine tells us when
+it is brewing -- no button, no weight-rate guessing.
 
 States and transitions:
 
-  idle ── start_brew(target_g) ──▶ brewing
-                                     │  contents >= target_g  (finished level)
-                                     ▼
-                                   ready ── clean_up() ──▶ idle
+  idle ── boiler on past a debounce ──▶ brewing
+                                          │  boiler off AND the pour has
+                                          │  settled (weight stops climbing)
+                                          ▼
+                                        ready ── reset() ──▶ idle
 
 - idle:    no active batch.  The weight still tells the UI whether a pot is
            sitting there, but nothing is claimed about freshness.
-- brewing: armed by BREW; watching the weight climb to the dialed target.
-           target_g is the FINISHED-pot level, so completion is an exact
-           match (within scale noise), no absorption margin.  If a brew
-           stalls short, the user dials the target down to complete it.
-- ready:   ready_time set; coffee ages by wall-clock (ticks even while the
-           pot is carried around -- the state is user-driven, so no inference
-           is needed to keep it).  is_stale() drives the biohazard once the
-           batch ages past the stale timeout.
+- brewing: the boiler is (or was just) running.  We watch the contents climb
+           and wait for the pour to finish.
+- ready:   ready_time set at the moment the pour settled (not boiler-off), so
+           the freshness clock starts when the last drips land.  Coffee ages
+           by wall-clock from there.
 
-clean_up() is the ONLY exit from ready, and brewing is only reachable from
-idle -- so "you must clean up before brewing again" is enforced by the
-workflow, with no dirty-tracking heuristics.
+Ready detection is weight-settle: once the boiler stops, we wait for the net
+weight to stop rising (no gain beyond SETTLE_EPSILON_G) for SETTLE_WINDOW_S,
+which rides out the drip tail.  With no scale (net is None) we fall back to a
+fixed SETTLE_FALLBACK_S after boiler-off.  With no current sensor (amps is
+None) the boiler never reads "on", so we never leave idle -- the pot simply
+shows as "present", the safe degradation.
+
+reset() is the Zero-empty-pot action: it tares and returns to a clean idle.
 
 store() returns "ready" on the transition into ready (the point to notify).
 elapsed() gives coffee age while ready, else time in the current state.
@@ -50,59 +54,127 @@ import time
 from scale import POT_TOLERANCE_G
 
 
-class Brains:
-    """Explicit idle/brewing/ready state machine over contents weight."""
+# Boiler on/off detected from clamp current with hysteresis, so noise around
+# the boundary can't chatter the state.  A live brew measured ~12.5 A against
+# ~0.5 A idle, leaving wide margin on both sides of this band.
+BOILER_ON_A = 5.0  # at/above -> boiler considered running
+BOILER_OFF_A = 2.0  # at/below -> boiler considered off
 
-    def __init__(self, tick_period=1, empty_thresh=0, now=time.time):
-        # tick_period accepted for API compatibility; unused now.
-        self.pot_empty_thresh_g = empty_thresh
+# The boiler must stay on this long before we call it a brew, so a brief
+# self-clean pulse or inrush blip doesn't arm brewing.
+BREW_ON_DEBOUNCE_S = 5.0
+
+# Ready = the pour has settled.  After boiler-off, the net weight must not
+# gain more than SETTLE_EPSILON_G for SETTLE_WINDOW_S before we call it ready,
+# which lets the drip tail finish.  SETTLE_FALLBACK_S is the no-scale path:
+# with no weight to watch, just wait a fixed spell after boiler-off.
+SETTLE_WINDOW_S = 20.0
+SETTLE_EPSILON_G = 5.0
+SETTLE_FALLBACK_S = 20.0
+
+
+class Brains:
+    """Current-driven idle/brewing/ready state machine over contents weight."""
+
+    def __init__(self, now=time.time):
         self._now = now  # injectable clock for testing
         self.state = "idle"
-        self.ready_time = None  # wall-clock when the batch became ready
-        self.target_g = None  # dialed brew target while brewing
+        self.ready_time = None  # wall-clock when the pour settled
         self.timestamp = 0  # when the current state was entered
-        self._net = 0.0  # last contents-weight sample
-        # "Needs clean" latch: set once a ready batch ages past the stale
-        # timeout, and NOT cleared by a subsequent brew -- only by clean_up().
-        # It is what keeps the biohazard on-screen as a "press CLEAN" reminder
-        # even into the next brew (the meatbags decide when to deal with it).
-        self.dirty = False
+        self._net = 0.0  # last contents-weight sample (grams, net of tare)
+        # Boiler-current tracking (hysteresis state + when it last came on).
+        self._boiler_on = False
+        self._boiler_on_since = None
+        # Weight-settle tracking while brewing: the running fill peak and when
+        # the pour last stopped rising (start of the settle window).
+        self._brew_peak_net = 0.0
+        self._settle_since = None
 
-    # --- user-driven transitions --------------------------------------
-    def start_brew(self, target_g):
-        """BREW pressed: arm brewing toward target_g grams of contents."""
-        self.target_g = target_g
-        self.ready_time = None
-        self._set_state("brewing")
+    # --- current-driven core -------------------------------------------
+    def _update_boiler(self, amps):
+        """Fold a current reading into the hysteretic boiler-on flag.  amps is
+        None when no sensor is present -> hold (so no sensor never arms)."""
+        if amps is None:
+            on = self._boiler_on  # can't tell; hold last known
+        elif amps >= BOILER_ON_A:
+            on = True
+        elif amps <= BOILER_OFF_A:
+            on = False
+        else:
+            on = self._boiler_on  # inside the hysteresis band; hold
+        self._boiler_on = on
+        if on:
+            if self._boiler_on_since is None:
+                self._boiler_on_since = self._now()
+        else:
+            self._boiler_on_since = None
 
-    def clean_up(self):
-        """CLEAN UP pressed: batch dealt with, return to idle and clear the
-        needs-clean latch (the ONLY thing that clears it)."""
-        self.ready_time = None
-        self.target_g = None
-        self.dirty = False
-        self._set_state("idle")
-
-    # --- measurement ---------------------------------------------------
-    def store(self, net):
+    def store(self, net, amps=None):
         """
-        Record a contents-weight sample (grams, net of tare).  While brewing,
-        completes to ready when the level reaches the dialed target (which is
-        the finished-pot level, so this is an exact match within scale noise
-        -- no absorption margin).  Returns "ready" on that transition, else
-        None.  If a brew stalls short, the user dials the target down to the
-        level actually reached, which completes it (dial-to-complete).
+        Record a tick: contents weight (grams net of tare, or None when the
+        scale reading is invalid/absent) and boiler current (amps, or None
+        with no sensor).  Advances the state machine and returns "ready" on
+        the transition into ready, else None.
         """
-        self._net = net
-        if self.state == "brewing" and self.target_g is not None:
-            if net >= self.target_g - POT_TOLERANCE_G:
+        self._update_boiler(amps)
+        if net is not None:
+            self._net = net
+        now = self._now()
+
+        if self.state != "brewing":
+            # Arm brewing once the boiler has run continuously past the
+            # debounce (a brief blip won't get here -- _boiler_on_since resets
+            # whenever the boiler reads off).  Reachable from idle AND from
+            # ready: a fresh brew started over an un-zeroed old batch is still
+            # a brew, so the cycle re-arms without needing the Zero button.
+            if (
+                self._boiler_on
+                and self._boiler_on_since is not None
+                and (now - self._boiler_on_since) >= BREW_ON_DEBOUNCE_S
+            ):
+                self._brew_peak_net = net if net is not None else 0.0
+                self._settle_since = None
+                self.ready_time = None
+                self._set_state("brewing")
+            return None
+
+        if self.state == "brewing":
+            # Weight still climbing (beyond noise) -> the pour isn't done;
+            # restart the settle window.
+            if net is not None and net > self._brew_peak_net + SETTLE_EPSILON_G:
+                self._brew_peak_net = net
+                self._settle_since = None
+            if self._boiler_on:
+                # Still heating -- not settling yet.
+                self._settle_since = None
+                return None
+            # Boiler off: time how long the pour has been stable.
+            if self._settle_since is None:
+                self._settle_since = now
+            window = SETTLE_WINDOW_S if net is not None else SETTLE_FALLBACK_S
+            if (now - self._settle_since) >= window:
                 return self._become_ready()
+            return None
+
+        # ready: aging is handled by elapsed()/is_stale(); nothing to advance.
         return None
 
     def _become_ready(self):
         self.ready_time = self._now()
+        self._settle_since = None
         self._set_state("ready")
         return "ready"
+
+    def reset(self):
+        """Zero-empty-pot pressed: pot tared and dealt with, return to a
+        clean idle (clears any ready batch and brew tracking)."""
+        self.ready_time = None
+        self._boiler_on = False
+        self._boiler_on_since = None
+        self._brew_peak_net = 0.0
+        self._settle_since = None
+        self._net = 0.0
+        self._set_state("idle")
 
     def _set_state(self, s):
         if self.state != s:
@@ -111,22 +183,14 @@ class Brains:
 
     # --- derived --------------------------------------------------------
     def is_stale(self, stale_s, now=None):
-        """True if the *current* ready batch has aged past the stale threshold.
-        A pure freshness query (drives drawing the pot empty); the persistent
-        biohazard reminder uses the `dirty` latch, not this."""
+        """True if the current ready batch has aged past the stale threshold.
+        A pure freshness query; there is no latch -- the biohazard condition
+        is recomputed each tick from state + age + contents (see potstate)."""
         if self.state != "ready" or self.ready_time is None:
             return False
         if now is None:
             now = self._now()
         return (now - self.ready_time) >= stale_s
-
-    def update_dirty(self, stale_s, now=None):
-        """Latch the needs-clean flag once the current ready batch goes stale.
-        Called each poll.  Once set, it stays set through a new brew and only
-        clean_up() clears it.  Returns the current latch value."""
-        if self.is_stale(stale_s, now=now):
-            self.dirty = True
-        return self.dirty
 
     def elapsed(self, now=None):
         """
@@ -143,16 +207,14 @@ class Brains:
     # --- persistence ---------------------------------------------------
     # ready_time is absolute wall-clock, so persisting it restores the *true*
     # coffee age across a reboot (even if the pot aged while powered off).
-    # The active state and target are persisted too, so a brew or ready pot
-    # resumes correctly.
+    # Boiler/settle tracking is transient -- it re-derives from live current on
+    # the next tick -- so only the brew lifecycle is persisted.
 
     def snapshot(self):
         return {
             "state": self.state,
             "ready_time": self.ready_time,
-            "target_g": self.target_g,
             "timestamp": self.timestamp,
-            "dirty": self.dirty,
         }
 
     def restore(self, snap):
@@ -160,9 +222,7 @@ class Brains:
             return
         self.state = snap.get("state", self.state)
         self.ready_time = snap.get("ready_time", self.ready_time)
-        self.target_g = snap.get("target_g", self.target_g)
         self.timestamp = snap.get("timestamp", self.timestamp)
-        self.dirty = snap.get("dirty", self.dirty)
 
 
 # vim: tabstop=4 shiftwidth=4 expandtab

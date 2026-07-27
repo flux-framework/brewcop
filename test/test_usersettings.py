@@ -29,7 +29,7 @@ class TestUserSettings(unittest.TestCase):
             self.assertEqual(s["pot_tare_g"], 795)
             self.assertEqual(s["slack_enabled"], False)
             self.assertAlmostEqual(s["dim_level"], 0.15)
-            self.assertEqual(s["brew_target_ml"], 1250)
+            self.assertEqual(s["pot_capacity_ml"], 1250)
 
     def test_save_and_reload_roundtrip(self):
         with tempfile.TemporaryDirectory() as d:
