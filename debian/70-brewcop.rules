@@ -1,8 +1,8 @@
-// Authorize the unprivileged brewcop service user for exactly the three
-// actions the on-screen power button takes -- nothing broader.  The button
-// shells out to systemctl (see brewcop/app.py); logind/systemd defer the
-// authorization decision to polkit, and the service runs as User=brewcop with
-// no login seat, so without this rule those calls are denied.
+// Authorize the unprivileged brewcop service user for exactly the actions the
+// on-screen power button takes -- nothing broader.  The button shells out to
+// systemctl (see brewcop/app.py); logind/systemd defer the authorization
+// decision to polkit, and the service runs as User=brewcop with no login seat,
+// so without this rule those calls are denied.
 //
 // Installed under /usr/share/polkit-1/rules.d (a package path), so a local
 // admin can still override it from /etc/polkit-1/rules.d, which polkit reads
