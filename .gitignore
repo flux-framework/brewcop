@@ -4,6 +4,10 @@ __pycache__/
 *.egg-info/
 .venv/
 
+# Build artifacts (pyproject/setuptools)
+/build/
+/dist/
+
 # C build artifacts (test/Makefile)
 *.o
 /test/query
