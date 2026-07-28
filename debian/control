@@ -1,0 +1,31 @@
+Source: brewcop
+Section: utils
+Priority: optional
+Maintainer: Jim Garlick <garlick.jim@gmail.com>
+Build-Depends:
+ debhelper-compat (= 13),
+ dh-python,
+ python3-all,
+ python3-setuptools,
+Standards-Version: 4.6.2
+Rules-Requires-Root: no
+
+Package: brewcop
+Architecture: all
+Depends:
+ ${python3:Depends},
+ ${misc:Depends},
+ python3-kivy,
+ python3-serial,
+ python3-paho-mqtt,
+ libmtdev1,
+ libphidget22,
+Description: touchscreen coffee monitor for the Technivorm at B451
+ brewcop is a Kivy touchscreen app that watches a Moccamaster/Technivorm
+ coffee machine.  It auto-detects brewing from the boiler current (a
+ Phidgets i-Snail clamp over a VINT hub), weighs the carafe on an
+ Avery-Berkel serial scale, and publishes a "ready" event to MQTT so a
+ downstream consumer can notify however it likes (Slack, signage, ...).
+ .
+ It runs as a single systemd service on a read-only-root Raspberry Pi OS
+ Lite kiosk driving the 7" DSI touchscreen directly via SDL2 on DRM/KMS.

@@ -1,0 +1,17 @@
+#!/usr/bin/make -f
+# brewcop is a pure-Python package built by pybuild from pyproject.toml;
+# dh_installsystemd/sysusers/tmpfiles pick up the debian/brewcop.* helper
+# files below.  Nothing here fetches from PyPI -- setuptools is the apt
+# python3-setuptools backend.
+
+export PYBUILD_NAME = brewcop
+
+%:
+	dh $@ --with python3 --buildsystem=pybuild
+
+# dh_installsysusers only joins the default sequence at compat 14; call it
+# explicitly here so the brewcop system user (debian/brewcop.sysusers) is
+# created on compat 13 too.  Run it BEFORE dh_installtmpfiles so the user
+# exists in the maintainer script before /var/lib/brewcop is chowned to it.
+execute_before_dh_installtmpfiles:
+	dh_installsysusers

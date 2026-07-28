@@ -1,0 +1,3 @@
+# Dedicated system user for the brewcop kiosk service.  Home is the writable
+# settings partition; no login shell.
+u brewcop - "brewcop kiosk" /var/lib/brewcop

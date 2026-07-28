@@ -1,0 +1,5 @@
+# Own the writable settings directory for the brewcop user.  On the target
+# this path is a small dedicated writable partition (f2fs); tmpfiles just
+# ensures ownership/mode.  The settings JSON itself is written only on an
+# explicit Save from the touchscreen.
+d /var/lib/brewcop 0755 brewcop brewcop -

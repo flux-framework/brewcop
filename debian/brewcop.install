@@ -1,0 +1,5 @@
+# Ship the machine-config example onto the read-only root.  Provisioning
+# copies it to /etc/brewcop/config.toml and fills it in; that real file is
+# created out-of-band, so it is deliberately NOT a dpkg conffile (no secret
+# in the package, no upgrade prompts).
+etc/config.toml.example etc/brewcop/

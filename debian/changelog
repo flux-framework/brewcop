@@ -1,0 +1,10 @@
+brewcop (0.1.0-1) unstable; urgency=low
+
+  * Initial Debian packaging.
+  * Kivy touchscreen app installed as a package with a /usr/bin/brewcop
+    console entry point.
+  * systemd service running as a dedicated brewcop system user.
+  * Publishes brew "ready" events to MQTT (python3-paho-mqtt); notification
+    policy lives in a downstream consumer, not in the app.
+
+ -- Jim Garlick <garlick.jim@gmail.com>  Tue, 28 Jul 2026 08:57:49 -0700

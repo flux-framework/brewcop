@@ -8,6 +8,17 @@ __pycache__/
 /build/
 /dist/
 
+# Debian packaging build artifacts (dpkg-buildpackage / pybuild).
+# Keep the debian/ source files; ignore the generated tree.
+/.pybuild/
+/debian/.debhelper/
+/debian/brewcop/
+/debian/files
+/debian/*.substvars
+/debian/*.debhelper
+/debian/*.debhelper.log
+/debian/debhelper-build-stamp
+
 # C build artifacts (test/Makefile)
 *.o
 /test/query

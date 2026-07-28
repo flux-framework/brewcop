@@ -1,0 +1,21 @@
+[Unit]
+Description=brewcop touchscreen coffee monitor
+Documentation=https://github.com/flux-framework
+After=multi-user.target
+
+[Service]
+# Dedicated unprivileged kiosk user (created via debian/brewcop.sysusers).
+# The supplementary groups grant just what the app needs: video/render for
+# SDL2 on DRM/KMS, input for the touchscreen, dialout for the USB serial
+# scale.  The Phidgets VINT hub is reached over libusb (udev), not a group.
+User=brewcop
+SupplementaryGroups=video render input dialout
+# Writable user-settings JSON lives on the small writable partition mounted
+# at /var/lib/brewcop (the rootfs is read-only + overlayfs).
+Environment=BREWCOP_CONFIG=/var/lib/brewcop/config.json
+ExecStart=/usr/bin/brewcop
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
