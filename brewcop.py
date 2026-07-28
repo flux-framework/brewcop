@@ -772,7 +772,7 @@ class HomeScreen(Screen):
         # Left block: stored tare + live delta from it (mirrors weight/amps).
         tare = self.app.settings["pot_tare_g"]
         self.tare_lbl.text = "tare {:.0f} g".format(tare)
-        self.delta_lbl.text = "{:+.0f} g".format(self._last_grams - tare)
+        self.delta_lbl.text = "Δ {:+.0f} g".format(self._last_grams - tare)
 
         # Notify + wake on the brewing->ready transition (app gates Slack).
         if result.event == "ready":
@@ -1308,14 +1308,13 @@ class BrewcopApp(App):
 
     # --- action rail ---------------------------------------------------
     def refresh_rail(self):
-        # WEIGH is always live.  ZERO is only enabled when it would actually do
-        # something: an empty-ish pot is on the scale (within ZERO_GUARD_G of
-        # the stored tare, so not a potful of coffee) AND it differs from that
-        # tare by more than ZERO_DEADBAND_G (else there's nothing to capture --
-        # it's already zeroed).  Greying it there is the missing feedback: with
-        # the pot at tare, off the scale, or full of coffee, the button dims
-        # and the left-side delta readout says why.  Mock keeps it live so the
-        # demo can always exercise it.
+        # WEIGH is always live.  ZERO is enabled whenever an empty-ish pot is on
+        # the scale -- i.e. the reading is within ZERO_GUARD_G of the stored
+        # tare, so not a potful of coffee and not an empty scale.  There is no
+        # lower deadband: nulling out small residual error is exactly what the
+        # tare is for, so even a reading right at the current tare stays
+        # zeroable.  Off the scale or full of coffee, the button dims and the
+        # left-side delta readout says why.  Mock keeps it live for the demo.
         self._enable(self._weigh_btn, True)
         self._enable(self._zero_btn, self.mock or self._zero_useful())
 
@@ -1326,7 +1325,7 @@ class BrewcopApp(App):
         if home is None:
             return False
         delta = abs(getattr(home, "_last_grams", 0.0) - self.settings["pot_tare_g"])
-        return self.ZERO_DEADBAND_G < delta <= self.ZERO_GUARD_G
+        return delta <= self.ZERO_GUARD_G
 
     @staticmethod
     def _enable(btn, on):
@@ -1337,9 +1336,6 @@ class BrewcopApp(App):
     # the reading as "an empty pot".  Wide enough for a swapped carafe or a bit
     # of residue, narrow enough to reject a pot with coffee still in it.
     ZERO_GUARD_G = 150
-    # Below this delta from the stored tare there's nothing worth re-zeroing --
-    # the pot already matches the tare, so ZERO greys out.
-    ZERO_DEADBAND_G = 10
 
     def _rail_zero(self):
         # Zero the empty pot: refuse unless the scale reading is close to the
