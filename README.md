@@ -71,9 +71,12 @@ python3 -m brewcop --mock --windowed
 
 On a brew reaching *ready* brewcop publishes to the MQTT topic
 `<prefix>/<location>/ready` (set `mqtt_host`, `mqtt_topic_prefix`,
-and `location` in the machine config).
+and `location` in the machine config).  It also publishes an
+`<prefix>/<location>/overflow` alert if it detects a brew running with
+nothing reaching the carafe (the flow selector left shut) -- the boiler is
+on but the carafe weight isn't climbing.
 
-A separate component would consume this MQTT topic and generate slack
+A separate component would consume these MQTT topics and generate slack
 or other types of notifications.
 
 #### Release

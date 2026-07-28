@@ -55,6 +55,20 @@ Weight rises a little with no BREW pressed.
 → nothing: stays `idle`, no `brewing`, no "fresh", no notification. (This is
 the bug the explicit model fixes — inference used to flash "fresh coffee".)
 
+**A5. Brew with the flow selector shut (overflow).** ✅🟡
+A common failure: the Moccamaster's flow selector is left shut (e.g. after
+washing the basket), so the boiler heats and brews but nothing reaches the
+carafe and the basket overfills onto the counter.  Detected as "boiler on this
+long with no weight gain" — while `brewing` with the boiler still drawing
+current, the contents don't climb more than `SETTLE_EPSILON_G` above the
+brew-start level for `OVERFLOW_GRACE_S` (30 s, conservative so a normal warmup
+never trips it).  Requires a scale; with none there is nothing to compare, so
+the guard stays quiet.
+→ a sticky red **OVERFLOW** banner on Home for as long as the condition holds,
+and one `overflow` alert published to MQTT on the rising edge.  It is a live
+derived condition, not a state, so it self-clears the instant coffee flows
+(gain exceeds epsilon) and never corrupts the idle/brewing/ready lifecycle.
+
 ---
 
 ## B. Coffee lifecycle (after ready)
@@ -144,6 +158,13 @@ to post to Slack, drive signage, etc. With `mqtt_host` empty the app runs
 normally and publishes nothing. Because ready only follows an explicit BREW,
 pours/placements/returns never publish — the storm is structurally impossible
 now, not just tuned away.
+
+**G2. Publish an "overflow" alert to MQTT.** 🟡
+On the rising edge of an overflow (A5), publish to
+`<mqtt_topic_prefix>/<location>/overflow`.  Unlike `ready` the alert is NOT
+retained: overflow is edge-triggered, so a consumer reconnecting after the
+spill was cleared must not be handed a stale alarm.  Fire-and-forget and
+gated by the same empty-`mqtt_host` no-op.
 
 ---
 
