@@ -139,6 +139,55 @@ class TestPublishReady(unittest.TestCase):
         self.assertFalse(sent)
 
 
+class TestPublishOverflow(unittest.TestCase):
+    def test_no_host_is_noop(self):
+        calls = []
+        restore = install_fake_paho(lambda *a, **k: calls.append((a, k)))
+        try:
+            sent = brewnotify.publish_overflow(FakeConfig(host=""), FakeResult())
+        finally:
+            restore()
+        self.assertFalse(sent)
+        self.assertEqual(calls, [])
+
+    def test_builds_topic_and_is_not_retained(self):
+        # overflow is an edge-triggered alert: distinct topic, and NOT retained
+        # (a late subscriber must not receive a stale alarm).
+        captured = {}
+
+        def single(topic, **kwargs):
+            captured["topic"] = topic
+            captured["kwargs"] = kwargs
+
+        restore = install_fake_paho(single)
+        try:
+            sent = brewnotify.publish_overflow(
+                FakeConfig(host="broker", location="B451"),
+                FakeResult(raw_grams=40.0, amps=12.5),
+            )
+        finally:
+            restore()
+        self.assertTrue(sent)
+        self.assertEqual(captured["topic"], "brewcop/B451/overflow")
+        self.assertFalse(captured["kwargs"]["retain"])
+        payload = json.loads(captured["kwargs"]["payload"])
+        self.assertEqual(payload["event"], "overflow")
+        self.assertEqual(payload["location"], "B451")
+
+    def test_publish_swallows_errors(self):
+        def boom(*a, **k):
+            raise OSError("connection refused")
+
+        restore = install_fake_paho(boom)
+        try:
+            sent = brewnotify.publish_overflow(
+                FakeConfig(host="localhost"), FakeResult()
+            )
+        finally:
+            restore()
+        self.assertFalse(sent)
+
+
 if __name__ == "__main__":
     unittest.main()
 

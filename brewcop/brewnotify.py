@@ -13,13 +13,13 @@
 """
 Publish brew domain events to MQTT.
 
-brewcop is notification-agnostic: it emits a `ready` event to the broker and a
-separate, redeployable consumer decides policy (Slack, signage, telemetry).
-This keeps the on-device app free of any one channel's secrets and outbound
-HTTP -- the broker/consumer live off the Pi.
+brewcop is notification-agnostic: it emits domain events (`ready`, `overflow`)
+to the broker and a separate, redeployable consumer decides policy (Slack,
+signage, telemetry).  This keeps the on-device app free of any one channel's
+secrets and outbound HTTP -- the broker/consumer live off the Pi.
 
-Fire-and-forget: publish_ready() swallows every failure (broker down, paho
-missing, misconfig) and never raises, so a publish can't wedge the poll tick.
+Fire-and-forget: the publish helpers swallow every failure (broker down, paho
+missing, misconfig) and never raise, so a publish can't wedge the poll tick.
 An empty mqtt_host means MQTT is unconfigured -> silent no-op.
 
 Uses paho's one-shot publish.single(): connect/publish/disconnect per event,
@@ -31,10 +31,11 @@ import json
 import sys
 
 
-def publish_ready(config, result):
-    """Publish a brewing->ready event to MQTT.  Returns True if the publish
-    was attempted and succeeded, False otherwise (unconfigured, paho absent,
-    or broker error).  Never raises."""
+def _publish(config, event, result, retain):
+    """Publish one domain event.  Returns True on a successful attempt, False
+    otherwise (unconfigured, paho absent, or broker error).  Never raises.
+    The topic is <prefix>/<location>/<event>; the payload carries the current
+    fill (rounded grams ~ mL) and boiler current."""
     host = getattr(config, "mqtt_host", "") or ""
     if not host:
         return False  # MQTT unconfigured -> no-op
@@ -43,12 +44,12 @@ def publish_ready(config, result):
         import paho.mqtt.publish as publish
 
         location = config.location
-        topic = "{}/{}/ready".format(config.mqtt_topic_prefix, location)
+        topic = "{}/{}/{}".format(config.mqtt_topic_prefix, location, event)
         ml = (result.raw_grams or 0.0) if result is not None else 0.0
         amps = result.amps if result is not None else None
         payload = json.dumps(
             {
-                "event": "ready",
+                "event": event,
                 "location": location,
                 "ml": round(ml),
                 "amps": amps,
@@ -59,12 +60,29 @@ def publish_ready(config, result):
             payload=payload,
             hostname=host,
             port=config.mqtt_port,
-            retain=True,
+            retain=retain,
         )
         return True
     except Exception as e:
         print("mqtt publish failed: {}".format(e), file=sys.stderr)
         return False
+
+
+def publish_ready(config, result):
+    """Publish a brewing->ready event to MQTT.  Returns True if the publish
+    was attempted and succeeded, False otherwise (unconfigured, paho absent,
+    or broker error).  Never raises.  Retained, so a late subscriber sees the
+    pot's current freshness state."""
+    return _publish(config, "ready", result, retain=True)
+
+
+def publish_overflow(config, result):
+    """Publish an overflow alert (brewing with nothing reaching the carafe) to
+    MQTT.  Returns True on a successful attempt, False otherwise.  Never raises.
+    NOT retained, unlike ready: overflow is an edge-triggered alert, so a
+    consumer reconnecting later must not be handed a stale alarm that has since
+    been cleared."""
+    return _publish(config, "overflow", result, retain=False)
 
 
 # vim: tabstop=4 shiftwidth=4 expandtab
