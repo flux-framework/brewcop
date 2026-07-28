@@ -73,6 +73,11 @@ first so apt can resolve it.
 Machine/deployment config lives in `/etc/brewcop/config.toml` -- copy the
 installed `/etc/brewcop/config.toml.example` and fill it in for the unit.
 
+The package also ships a polkit rule
+(`/usr/share/polkit-1/rules.d/70-brewcop.rules`) that lets the on-screen power
+button power off, reboot, or restart the app as the unprivileged `brewcop`
+user.
+
 For development without hardware, run it straight from a checkout:
 ```
 python3 -m brewcop --mock --windowed
