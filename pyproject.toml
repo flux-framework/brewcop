@@ -25,8 +25,3 @@ brewcop = "brewcop.app:main"
 
 [tool.setuptools]
 packages = ["brewcop"]
-
-[tool.setuptools.package-data]
-# Ship the artwork inside the package so the __file__-relative IMAGES_DIR
-# lookup in app.py resolves post-install.
-brewcop = ["images/*"]
