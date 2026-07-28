@@ -1,0 +1,32 @@
+# Source build metadata for brewcop.
+#
+# This describes how to BUILD the package; it is not how brewcop is installed
+# on the target.  Debian's pybuild/dh-python consumes this to build the .deb,
+# and the Pi only ever gets software via dpkg/apt -- never pip.  So the
+# runtime dependency list lives in debian/control (the source of truth for what
+# the .deb pulls in, by apt package name), NOT here: pinning PyPI-style
+# dependencies in [project] would just risk pybuild trying to resolve them.
+#
+# setuptools is the backend (apt: python3-setuptools) so nothing is fetched
+# from PyPI at build time.
+
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "brewcop"
+version = "0.1.0"
+description = "Kivy touchscreen coffee monitor for the Technivorm at B451"
+requires-python = ">=3.11"  # stdlib tomllib (machineconfig)
+
+[project.scripts]
+brewcop = "brewcop.app:main"
+
+[tool.setuptools]
+packages = ["brewcop"]
+
+[tool.setuptools.package-data]
+# Ship the artwork inside the package so the __file__-relative IMAGES_DIR
+# lookup in app.py resolves post-install.
+brewcop = ["images/*"]
