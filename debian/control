@@ -5,6 +5,7 @@ Maintainer: Jim Garlick <garlick.jim@gmail.com>
 Build-Depends:
  debhelper-compat (= 13),
  dh-python,
+ pybuild-plugin-pyproject,
  python3-all,
  python3-setuptools,
 Standards-Version: 4.6.2
