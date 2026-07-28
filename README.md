@@ -11,7 +11,7 @@ The scale is also functional for weighing beans.
 
 ### Touchscreen
 
-The Raspberry Pi 2 used in this project has a
+The Raspberry Pi 3 used in this project has a
 [Touch Screen](https://www.raspberrypi.org/products/raspberry-pi-touch-display/).
 
 It uses the Pi DSI connector for data, and the [Pi GPIO](https://pinout.xyz/)
@@ -27,56 +27,40 @@ brewcop runs as a systemd service that drives the display directly with
 ### Scale Interface
 
 The scale is a
-[Avery-Berkel 6702 bench scale](https://drive.google.com/file/d/1n3imd2Zp-DZ9iqJYqm4FAiBpAGmSxwYa)
-purchased on Ebay.
+[Avery-Berkel 6702 bench scale](https://drive.google.com/file/d/1n3imd2Zp-DZ9iqJYqm4FAiBpAGmSxwYa).
 
-It is interfaced to the Pi via a serial port.  Since the scale runs at
-standard RS-232 signal levels and the Pi serial port uses 3V3 signaling,
-a [NulSom Inc. Ultra Compact RS232 to TTL Converter with Male DB9 (3.3V to 5V)](https://www.amazon.com/NulSom-Inc-Ultra-Compact-Converter/dp/B00OPU2QJ4)
-is built into the DB-9 connector shell.  The converter connects to the Pi GPIO:
+It is interfaced to the Pi via a USB serial cable.
+Serial configuration of 9600,7N1.
 
-* Pin 1 (3V3) to red wire
-* Pin 9 (GND) to black wire
-* Pin 8 (UART TX) to brown wire
-* Pin 10 (UART RX) to orange wire
+`python3 test/scale_probe.py` can be used to do a quick sanity check on
+connectivity.
 
-The device appears as `/dev/ttyAMA0` on the Pi, after disabling
-console output in `raspi-config`.  No NULL modem adapter was
-required between the converter and the scale, which expects a
-serial configuration of 9600,7N1.
+### Brew Sensing
 
-The `query` program down in the `test` directory can be used to do a
-quick weight query to the scale to test connectivity.
-```
-$ ./query
-0.000000
-```
-
-### Network
-
-The Pi 2 doesn't have on-board wifi, so a WiPi USB network dongle is used.
-The hostname is `brewcop.local`.
+An Elkor [i-Snail-VC-25 current sensor](https://www.elkor.net/product/i-Snail-VC)
+reads current from the Technivorm Moccamaster AC input.  Its DC 0-5V output is
+transmitted to a Phidgets [1-port USB VINT hub](https://www.phidgets.com/?prodid=1290).
+This allows brewcop to directly sense when coffee is brewing.  The Moccamaster
+does not have a hot plate so the current signal is unambiguous.
 
 ### Install
 
 brewcop ships as a Debian package and installs (with its systemd service)
 via apt:
 ```
-sudo apt install ./brewcop_*.deb
+sudo apt install ../brewcop_*.deb
 ```
-Runtime dependencies (`python3-kivy`, `python3-serial`, `python3-paho-mqtt`,
-`libmtdev1`, `libphidget22`) are pulled from apt -- there is no `pip install`
-on the target.  `libphidget22` (the i-Snail current sensor library) is not in
-Debian proper; add the [Phidgets apt repo](https://www.phidgets.com/docs/OS_-_Linux)
+`libphidget22` (the i-Snail current sensor library) is a dependency that is
+not in Debian proper; add the [Phidgets apt repo](https://www.phidgets.com/docs/OS_-_Linux)
 first so apt can resolve it.
 
 Machine/deployment config lives in `/etc/brewcop/config.toml` -- copy the
-installed `/etc/brewcop/config.toml.example` and fill it in for the unit.
+installed `/etc/brewcop/config.toml.example` and fill it in for the unit,
+or live with the defaults.
 
 The package also ships a polkit rule
 (`/usr/share/polkit-1/rules.d/70-brewcop.rules`) that lets the on-screen power
-button power off, reboot, or restart the app as the unprivileged `brewcop`
-user.
+button reboot the app or the OS as the unprivileged `brewcop` user.
 
 For development without hardware, run it straight from a checkout:
 ```
@@ -85,12 +69,12 @@ python3 -m brewcop --mock --windowed
 
 ### Notifications
 
-brewcop is notification-agnostic.  On a brew reaching *ready* it publishes to
-the MQTT topic `<prefix>/<location>/ready` (set `mqtt_host`, `mqtt_topic_prefix`,
-and `location` in the machine config).  A separate MQTT consumer -- not this
-app -- decides what to do with the event (post to Slack, drive signage, log
-telemetry).  With `mqtt_host` empty, brewcop runs normally and just publishes
-nothing.
+On a brew reaching *ready* brewcop publishes to the MQTT topic
+`<prefix>/<location>/ready` (set `mqtt_host`, `mqtt_topic_prefix`,
+and `location` in the machine config).
+
+A separate component would consume this MQTT topic and generate slack
+or other types of notifications.
 
 #### Release
 
