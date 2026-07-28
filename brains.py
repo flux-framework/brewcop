@@ -182,6 +182,14 @@ class Brains:
             self.timestamp = self._now()
 
     # --- derived --------------------------------------------------------
+    @property
+    def boiler_on(self):
+        """The raw hysteretic boiler-on flag, before the brew-arm debounce.
+        The UI uses this to show the rain cloud the instant the heater fires,
+        rather than waiting out BREW_ON_DEBOUNCE_S for the state to reach
+        'brewing'."""
+        return self._boiler_on
+
     def is_stale(self, stale_s, now=None):
         """True if the current ready batch has aged past the stale threshold.
         A pure freshness query; there is no latch -- the biohazard condition

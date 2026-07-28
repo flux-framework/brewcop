@@ -398,12 +398,16 @@ class CarafeWidget(Widget):
             body_cy = by + body_h * 0.42
             self._draw_hazard(cx, body_cy, min(top_w, base_w), body_h)
 
-        # Brewing: a rain-cloud icon in the same spot (drops falling into the
-        # pot), giving immediate feedback the moment the boiler is sensed
-        # running.  Yields to the biohazard just like the smiley does.
+        # Brewing: a rain-cloud ABOVE the carafe, drops falling down into the
+        # lid -- reads as the machine raining coffee into the pot.  Sits in the
+        # headroom over the lid; drops fall from the cloud down to the pour
+        # spout.  Immediate feedback the moment the boiler is sensed running;
+        # yields to the biohazard just like the smiley does.
         if self._brewing and not self._needs_clean:
-            body_cy = by + body_h * 0.42
-            self._draw_brewing(cx, body_cy, min(top_w, base_w), body_h)
+            lid_top = ly + lid_h
+            head = (y + h) - lid_top  # free space above the lid
+            cloud_cy = lid_top + head * 0.62  # cloud sits high in the headroom
+            self._draw_brewing(cx, cloud_cy, top_w * 1.25, lid_top)
 
         # Fresh/aging coffee: draw a smiley in the SAME spot the biohazard
         # would go (the happy counterpart to "gone bad").  Below it, an elapsed
@@ -454,15 +458,14 @@ class CarafeWidget(Widget):
             # symmetric bottom arc -> an upturned smile.
             Line(circle=(cxc, cyc + r * 0.05, r * 0.55, 120, 240), width=lw)
 
-    def _draw_brewing(self, cxc, cyc, ref_w, ref_h):
-        """Rain-cloud icon inside the carafe body -- the brewing counterpart to
-        the smiley: a puffy cloud with drops falling into the pot.  The drops
-        shift with the blink clock so the rain animates.  `cxc, cyc` is the
-        icon center (Kivy y is up, so the cloud sits above cyc, drops below)."""
-        side = min(ref_w * 0.72, ref_h * 0.44)
-        r = side / 2.0
-        # cloud body sits a bit ABOVE center so drops have room below it
-        ccx, ccy = cxc, cyc + r * 0.20
+    def _draw_brewing(self, cxc, ccy, ref_w, rain_to_y):
+        """Rain-cloud ABOVE the carafe -- the brewing counterpart to the smiley:
+        a puffy cloud with drops falling down into the pot.  `cxc, ccy` is the
+        cloud center; drops fall from just under the cloud down to `rain_to_y`
+        (the pot mouth).  The drops shift with the blink clock so the rain
+        animates."""
+        r = (ref_w * 0.5) / 2.0
+        ccx = cxc
         with self.canvas.before:
             # puffy cloud: overlapping filled ellipses + a flat bottom slab.
             # (ox, oy, radius) in units of r, oy positive = up.
@@ -481,15 +484,20 @@ class CarafeWidget(Widget):
                 size=(r * 1.47, r * 0.5),
                 radius=[r * 0.12],
             )
-            # falling drops (blue), below the cloud.  Two-phase vertical shift
-            # from the blink clock gives a simple rain animation.
+            # falling drops (blue) streaming from the cloud down toward the pot
+            # mouth.  Each drop wraps within the gap; the blink clock gives it a
+            # simple two-phase downward crawl so the rain reads as moving.
             Color(*ACCENT)
-            phase = 0.0 if self._blink_on else r * 0.22
-            drop_top = ccy - r * 0.55
-            dl = r * 0.34  # drop length
+            cloud_bottom = ccy - r * 0.5
+            gap = max(dp(12), cloud_bottom - rain_to_y)
+            dl = min(r * 0.4, gap * 0.28)  # drop length
+            phase = (0.0 if self._blink_on else 0.5) * (gap / 2.0)
             for i, ox in enumerate((-0.4, 0.05, 0.5)):
                 dx = ccx + ox * r
-                dy = drop_top - (i % 2) * r * 0.18 - phase
+                # stagger the three streams, then crawl them down with phase,
+                # wrapping back up so drops keep flowing rather than draining
+                offset = (i * gap / 3.0 + phase) % (gap / 2.0)
+                dy = cloud_bottom - offset
                 Line(points=[dx, dy, dx, dy - dl], width=dp(2.5), cap="round")
 
     def _poly(self, pts):
@@ -755,7 +763,7 @@ class HomeScreen(Screen):
         pot = result.pot_state
 
         self._pot = pot
-        self._render(pot)
+        self._render(pot, boiler_on=result.boiler_on)
         # Let the app refresh the rail's enabled/disabled buttons.
         self.app.refresh_rail()
         # Live weight readout beside the status line.  While the scale is
@@ -800,7 +808,7 @@ class HomeScreen(Screen):
 
         Clock.schedule_once(_end, seconds)
 
-    def _render(self, pot):
+    def _render(self, pot, boiler_on=False):
         # Two carafe signals: `expired` empties the body when the current batch
         # is stale (stale coffee shouldn't look drinkable); `needs_clean` drives
         # the biohazard reminder (stale + coffee still in the pot), recomputed
@@ -822,6 +830,12 @@ class HomeScreen(Screen):
         self.carafe.opacity = 0.35 if pot.key == "no_pot" else 1.0
         coffee = AMBER if pot.key == "aging" else GREEN
         age_text = pot.key if pot.key in ("fresh", "aging") else ""
+        # Show the rain cloud whenever the heater is drawing current, not just
+        # once the state machine has armed "brewing" -- boiler_on leads the
+        # brewing state by BREW_ON_DEBOUNCE_S, so the rain starts the instant
+        # the Moccamaster switches on, and keeps falling through the post-boiler
+        # settle until the batch goes ready.
+        brewing = boiler_on or pot.key == "brewing"
         self.carafe.set_state(
             pot.fill,
             coffee,
@@ -829,7 +843,7 @@ class HomeScreen(Screen):
             age_text=age_text,
             age_s=pot.age_s,
             needs_clean=pot.needs_clean,
-            brewing=(pot.key == "brewing"),
+            brewing=brewing,
         )
         # Actions live in the app-level rail (ZERO / WEIGH); nothing to do here.
 

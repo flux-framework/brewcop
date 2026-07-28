@@ -39,6 +39,7 @@ class PollResult:
         valid=False,
         moving=False,
         amps=None,
+        boiler_on=False,
     ):
         self.pot_state = pot_state  # potstate.PotState
         self.event = event  # "ready" or None
@@ -46,6 +47,7 @@ class PollResult:
         self.valid = valid  # was the last weight valid
         self.moving = moving  # scale in motion / reading not yet stable
         self.amps = amps  # last boiler current reading (A) or None
+        self.boiler_on = boiler_on  # heater drawing current now (pre-debounce)
 
 
 class ScaleBrewSource:
@@ -118,6 +120,7 @@ class ScaleBrewSource:
                 valid=False,
                 moving=True,
                 amps=amps,
+                boiler_on=self._brains.boiler_on,
             )
 
         raw = self._scale.weight
@@ -146,7 +149,13 @@ class ScaleBrewSource:
         )
         self._last_pot = pot
         return PollResult(
-            pot, event=event, raw_grams=raw, valid=True, moving=False, amps=amps
+            pot,
+            event=event,
+            raw_grams=raw,
+            valid=True,
+            moving=False,
+            amps=amps,
+            boiler_on=self._brains.boiler_on,
         )
 
     def zero(self):
@@ -195,7 +204,14 @@ class MockBrewSource:
         # readout: a brewing state draws ~12.5 A, everything else sits at the
         # ~0.5 A idle standing current.
         amps = 12.5 if st.key == "brewing" else 0.5
-        return PollResult(st, event=None, raw_grams=None, valid=True, amps=amps)
+        return PollResult(
+            st,
+            event=None,
+            raw_grams=None,
+            valid=True,
+            amps=amps,
+            boiler_on=(st.key == "brewing"),
+        )
 
     def advance(self):
         """Move to the next mock state (e.g. on a screen tap)."""

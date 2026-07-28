@@ -159,9 +159,13 @@ class TestScaleBrewSource(unittest.TestCase):
         src._brains._now = lambda: clock[0]  # injectable clock
         r1 = src.poll()  # boiler just came on; debounce not yet met
         self.assertEqual(r1.pot_state.key, "present")
+        # boiler_on leads the brewing state: it's true immediately (drives the
+        # rain cloud), before the debounce has armed "brewing".
+        self.assertTrue(r1.boiler_on)
         clock[0] += brains.BREW_ON_DEBOUNCE_S + 1
         r2 = src.poll()  # sustained -> brewing
         self.assertEqual(r2.pot_state.key, "brewing")
+        self.assertTrue(r2.boiler_on)
         cur.amps_value = IDLE_A  # boiler off, pour settling
         src.poll()
         clock[0] += brains.SETTLE_WINDOW_S + 1
@@ -293,9 +297,13 @@ class TestMockBrewSource(unittest.TestCase):
             potstate.PotState("fresh", "Fresh", fill=0.7),
         ]
         src = brewsource.MockBrewSource(states)
-        self.assertAlmostEqual(src.poll().amps, 12.5)  # brewing
+        r = src.poll()
+        self.assertAlmostEqual(r.amps, 12.5)  # brewing
+        self.assertTrue(r.boiler_on)  # brewing -> heater on (rain cloud)
         src.advance()
-        self.assertAlmostEqual(src.poll().amps, 0.5)  # idle
+        r = src.poll()
+        self.assertAlmostEqual(r.amps, 0.5)  # idle
+        self.assertFalse(r.boiler_on)
 
 
 if __name__ == "__main__":

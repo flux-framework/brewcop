@@ -76,6 +76,16 @@ class TestBrains(unittest.TestCase):
         b.store(300, amps=IDLE_A)  # dropped before the debounce elapsed
         self.assertEqual(b.state, "idle")
 
+    def test_boiler_on_leads_brewing_state(self):
+        # boiler_on flips true on the first hot reading -- before the debounce
+        # arms the brewing state -- so the UI can start the rain cloud at once.
+        b, clk = make()
+        b.store(300, amps=BREW_A)
+        self.assertTrue(b.boiler_on)  # heater sensed immediately
+        self.assertEqual(b.state, "idle")  # but not armed yet (debounce)
+        b.store(300, amps=IDLE_A)
+        self.assertFalse(b.boiler_on)  # and clears when the heater stops
+
     def test_sustained_boiler_arms_brewing(self):
         b, clk = make()
         b.store(300, amps=BREW_A)
