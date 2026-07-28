@@ -165,7 +165,7 @@ class FlatButton(Button):
 # The three privileged actions the on-screen power button can take, mapped to
 # the systemctl command that performs each.  These are authorized for the
 # unprivileged `brewcop` service user by the polkit rule shipped in the deb
-# (see debian/brewcop.polkit); with no grant they are simply denied, which the
+# (see debian/70-brewcop.rules); with no grant they are simply denied, which the
 # UI surfaces rather than crashing on.
 _SYSTEM_ACTIONS = {
     "poweroff": ["systemctl", "poweroff"],
