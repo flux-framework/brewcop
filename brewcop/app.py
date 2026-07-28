@@ -162,14 +162,17 @@ class FlatButton(Button):
 
 
 # --- power control -------------------------------------------------------
-# The three privileged actions the on-screen power button can take, mapped to
-# the systemctl command that performs each.  These are authorized for the
+# The privileged actions the on-screen power button can take, mapped to the
+# systemctl command that performs each.  These are authorized for the
 # unprivileged `brewcop` service user by the polkit rule shipped in the deb
 # (see debian/70-brewcop.rules); with no grant they are simply denied, which the
-# UI surfaces rather than crashing on.
+# UI surfaces rather than crashing on.  stop/restart both fall under the rule's
+# manage-units grant (scoped to brewcop.service); a clean stop is not a failure,
+# so Restart=on-failure leaves the app down until it is started again.
 _SYSTEM_ACTIONS = {
     "poweroff": ["systemctl", "poweroff"],
     "reboot": ["systemctl", "reboot"],
+    "stop-app": ["systemctl", "stop", "brewcop.service"],
     "restart-app": ["systemctl", "restart", "brewcop.service"],
 }
 
@@ -237,7 +240,7 @@ class PowerMenu(ModalView):
     def __init__(self, on_action, **kwargs):
         super().__init__(
             size_hint=(None, None),
-            size=(dp(360), dp(320)),
+            size=(dp(360), dp(380)),
             background_color=(0, 0, 0, 0.6),
             auto_dismiss=True,
             **kwargs,
@@ -265,6 +268,7 @@ class PowerMenu(ModalView):
         for label, verb, bg, fg in (
             ("Power off", "poweroff", RED, INK),
             ("Reboot", "reboot", PANEL, INK),
+            ("Stop app", "stop-app", PANEL, INK),
             ("Restart app", "restart-app", PANEL, ACCENT),
         ):
             b = FlatButton(text=label, bg=bg, fg=fg, font_size=sp(18))
