@@ -209,7 +209,9 @@ class PowerButton(FlatButton):
     """
 
     def __init__(self, **kwargs):
-        super().__init__(bg=BG, **kwargs)
+        # DIAGNOSTIC: visible panel background so the actual tap target is
+        # visible on screen (normally bg=BG, invisible against the screen).
+        super().__init__(bg=PANEL, **kwargs)
         with self.canvas.after:
             self._glyph_color = Color(*ACCENT)
             self._glyph_arc = Line(width=dp(2))
