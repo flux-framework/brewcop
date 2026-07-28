@@ -215,6 +215,13 @@ class PowerButton(FlatButton):
             self._glyph_arc = Line(width=dp(2))
             self._glyph_bar = Line(width=dp(2))
         self.bind(pos=self._draw_glyph, size=self._draw_glyph)
+        # The pos/size binds fire during __init__ (at the window origin) and on
+        # resize, but a pos_hint-positioned widget is moved by the parent's
+        # first layout pass without reliably re-firing pos here -- leaving the
+        # glyph drawn at the pre-layout origin while touches land at the real
+        # (moved) position.  Redraw once after that first layout frame so the
+        # glyph and the hit box agree.
+        Clock.schedule_once(self._draw_glyph, 0)
 
     def _draw_glyph(self, *_a):
         # Center the glyph in the button; radius near half the shorter side so
