@@ -19,9 +19,9 @@ calls poll() on a timer and renders the PotState -- it does not know or care
 whether the data came from a real scale or a mock.  This is what the app's
 --mock flag selects between.
 
-Kept free of Kivy so it is unit-testable headlessly.  Slack notification is
-NOT done here; poll() surfaces the "ready" event and the app decides whether
-to notify (gated by config, and off until the detector is retuned).
+Kept free of Kivy so it is unit-testable headlessly.  Notification is NOT
+done here; poll() surfaces the "ready" event and the app publishes it to
+MQTT, where a downstream consumer decides policy.
 """
 
 import potstate

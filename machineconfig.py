@@ -14,19 +14,20 @@
 Machine / deployment config (read-only TOML).
 
 This is the *install-time* config -- facts set once when the unit is
-provisioned and never written at runtime: the serial port path, the Slack
-webhook URL (a secret), whether Slack is enabled, and the location string.
-Because it is never written while running, it lives fine on the read-only
-root (unlike the user-tweakable settings, which need a writable partition).
+provisioned and never written at runtime: the serial port path, the MQTT
+broker host/port/topic-prefix that `ready` events publish to, and the
+location string.  There is no secret here (notification policy and any
+webhook secrets live in the downstream MQTT consumer, off the Pi).  Because
+it is never written while running, it lives fine on the read-only root
+(unlike the user-tweakable settings, which need a writable partition).
 
-Distinct from the user settings (stale timeout, pot tare, etc.) edited via
-the touchscreen Settings screen -- see MODERNIZATION.md, "Two configs".
+Distinct from the user settings (pot tare/capacity, etc.) edited via the
+touchscreen Settings screen -- see MODERNIZATION.md, "Two configs".
 
 Load precedence (later overrides earlier):
   1. built-in DEFAULTS
   2. TOML file (explicit path, else $BREWCOP_MACHINE_CONFIG, else
      /etc/brewcop/config.toml)  -- absent file is fine
-  3. environment fallbacks (SLACK_WEBHOOK_URL) -- dev convenience
 
 Read via stdlib tomllib (Python 3.11+), so no extra apt dependency.
 """
@@ -40,11 +41,13 @@ DEFAULT_PATH = "/etc/brewcop/config.toml"
 DEFAULTS = {
     # Serial device for the scale. "auto" -> autodetect a USB adapter.
     "serial_port": "auto",
-    # Slack webhook URL (a secret): WHERE ready-pot messages are sent.
-    # WHETHER to send them is a runtime user setting (slack_enabled), not
-    # here -- this file is install-time facts only.
-    "slack_webhook_url": "",
-    # Deployment location, woven into the "coffee is ready" messages.
+    # MQTT broker that `ready` events publish to.  Empty host = MQTT off
+    # (the app runs fine, it just doesn't publish).  What to DO with a
+    # published event is the downstream consumer's job, not brewcop's.
+    "mqtt_host": "",
+    "mqtt_port": 1883,
+    "mqtt_topic_prefix": "brewcop",
+    # Deployment location, woven into the topic and event payload.
     "location": "B451",
 }
 
@@ -66,8 +69,16 @@ class MachineConfig:
         return self._values["serial_port"]
 
     @property
-    def slack_webhook_url(self):
-        return self._values["slack_webhook_url"]
+    def mqtt_host(self):
+        return self._values["mqtt_host"]
+
+    @property
+    def mqtt_port(self):
+        return self._values["mqtt_port"]
+
+    @property
+    def mqtt_topic_prefix(self):
+        return self._values["mqtt_topic_prefix"]
 
     @property
     def location(self):
@@ -75,13 +86,6 @@ class MachineConfig:
 
     def as_dict(self):
         return dict(self._values)
-
-    def redacted(self):
-        """as_dict() with the webhook masked -- safe to log/print."""
-        d = dict(self._values)
-        if d.get("slack_webhook_url"):
-            d["slack_webhook_url"] = "<set>"
-        return d
 
 
 def _config_path(explicit=None):
@@ -112,21 +116,14 @@ def load(path=None):
         if key in data:
             values[key] = data[key]
 
-    # Environment fallback for the secret (dev convenience). Only fills in
-    # when the file did not provide one.
-    if not values["slack_webhook_url"]:
-        env_url = os.environ.get("SLACK_WEBHOOK_URL")
-        if env_url:
-            values["slack_webhook_url"] = env_url
-
     return MachineConfig(values)
 
 
 if __name__ == "__main__":
-    # Quick manual check: print the resolved config (webhook redacted).
+    # Quick manual check: print the resolved config.
     import json
 
     cfg = load()
-    print(json.dumps(cfg.redacted(), indent=2))
+    print(json.dumps(cfg.as_dict(), indent=2))
 
 # vim: tabstop=4 shiftwidth=4 expandtab

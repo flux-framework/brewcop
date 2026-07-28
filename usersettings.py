@@ -12,7 +12,7 @@
 
 """
 User settings: the runtime-tweakable preferences edited on the Settings
-screen (pot tare/capacity, Slack on/off, backlight dimming).  Distinct from
+screen (pot tare/capacity, backlight dimming).  Distinct from
 machineconfig (install-time facts on the
 read-only root): these change at runtime and must survive reboots, so they
 live in a writable JSON, saved only on explicit Save.
@@ -31,7 +31,6 @@ import os
 
 
 DEFAULTS = {
-    "slack_enabled": False,  # announce ready pots to Slack (off until retuned)
     "pot_tare_g": 795,  # empty Technivorm carafe; re-tared by Zero, persisted
     "pot_capacity_ml": 1250,  # full pot (1 g per mL water)
     "dim_timeout_s": 120,  # dim backlight after N s of no touch (0 = never)

@@ -27,7 +27,7 @@ class TestUserSettings(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             s = usersettings.UserSettings(os.path.join(d, "none.json"))
             self.assertEqual(s["pot_tare_g"], 795)
-            self.assertEqual(s["slack_enabled"], False)
+            self.assertEqual(s["wake_on_event"], True)
             self.assertAlmostEqual(s["dim_level"], 0.15)
             self.assertEqual(s["pot_capacity_ml"], 1250)
 
@@ -35,11 +35,11 @@ class TestUserSettings(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             p = os.path.join(d, "sub", "config.json")  # dir created on save
             s = usersettings.UserSettings(p)
-            s["slack_enabled"] = True
+            s["wake_on_event"] = False
             s["pot_capacity_ml"] = 1000
             s.save()
             s2 = usersettings.UserSettings(p)
-            self.assertEqual(s2["slack_enabled"], True)
+            self.assertEqual(s2["wake_on_event"], False)
             self.assertEqual(s2["pot_capacity_ml"], 1000)
             # untouched key keeps its default
             self.assertEqual(s2["pot_tare_g"], 795)

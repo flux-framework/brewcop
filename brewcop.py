@@ -29,17 +29,17 @@ the layout never moves, so the verbs are always in the same place.
 Screens (three total):
   Home     -- Flux mark + wordmark, the live carafe with its age clock.
   Weigh    -- live scale weight, g/oz units toggle, tare, dosing hint, Back.
-  Settings -- Slack on/off + steppers for tunable parameters (usersettings).
+  Settings -- steppers for tunable parameters (usersettings).
 
 Data comes from a brewsource: the real ScaleBrewSource (scale + current ->
 Brains -> potstate) in normal operation, or a MockBrewSource cycling canned
 states under --mock (tap the mock strip to advance).
 
-Notifications: on a brew reaching ready we notify Slack ONLY IF the user
-setting slack_enabled is on (default OFF). Because ready follows a sensed
-boiler cycle with a settled pour, it no longer storms on pours or placements.
+Notifications: on a brew reaching ready we publish a `ready` event to MQTT
+(see brewnotify); a separate, redeployable consumer decides what to do with
+it (Slack, signage, telemetry). The app itself is notification-agnostic.
 
-Config: machine facts (serial port, webhook URL, location) come from
+Config: machine facts (serial port, MQTT broker, location) come from
 machineconfig (read-only /etc/brewcop/config.toml); tweakable preferences
 from usersettings (writable JSON, saved on the Settings screen).
 
@@ -79,6 +79,7 @@ import usersettings
 import potstate
 import brewsource
 import brewstate
+import brewnotify
 from scale import open_scale, NoScale
 from currentsensor import open_current_sensor, NoCurrentSensor
 from backlight import Backlight
@@ -725,7 +726,7 @@ class HomeScreen(Screen):
         # Coffee volume: net grams at 1.01 g/mL, floored at zero.
         self.coffee_lbl.text = "coffee {:.0f} mL".format(max(0.0, net) / 1.01)
 
-        # Notify + wake on the brewing->ready transition (app gates Slack).
+        # Publish + wake on the brewing->ready transition (app -> MQTT).
         if result.event == "ready":
             self.app.on_ready_event(result)
         # Wake the screen on any state change worth noticing.
@@ -979,42 +980,6 @@ class StepperRow(BoxLayout):
         self.value_lbl.text = self.fmt(self.config[self.key])
 
 
-class ToggleRow(BoxLayout):
-    """A labeled on/off toggle for a boolean config key."""
-
-    def __init__(self, name, config, key, **kwargs):
-        super().__init__(
-            orientation="horizontal",
-            size_hint_y=None,
-            height=dp(60),
-            spacing=dp(12),
-            **kwargs
-        )
-        self.config = config
-        self.key = key
-        self.add_widget(setting_label(name))
-        self.btn = FlatButton(
-            text="",
-            bg=PANEL,
-            font_size=sp(18),
-            bold=True,
-            size_hint_x=None,
-            width=dp(120),
-        )
-        self.btn.bind(on_release=lambda *_a: self._toggle())
-        self.add_widget(self.btn)
-        self._render()
-
-    def _toggle(self):
-        self.config[self.key] = not self.config[self.key]
-        self._render()
-
-    def _render(self):
-        on = bool(self.config[self.key])
-        self.btn.text = "ON" if on else "OFF"
-        self.btn.color = GREEN if on else MUTED
-
-
 class SettingsScreen(Screen):
     def __init__(self, go, config, **kwargs):
         super().__init__(**kwargs)
@@ -1032,7 +997,6 @@ class SettingsScreen(Screen):
         )
         rows.bind(minimum_height=rows.setter("height"))
 
-        rows.add_widget(ToggleRow("Slack announcements", config, "slack_enabled"))
         # Pot tare and empty threshold are no longer tunable here: the ZERO
         # button captures an accurate tare per brew (persisted), and the empty
         # threshold is a fixed constant now that the tare is trustworthy.
@@ -1204,27 +1168,11 @@ class BrewcopApp(App):
 
     # --- events from the Home screen ----------------------------------
     def on_ready_event(self, result):
-        """A brewing->ready transition happened.  Notify Slack IF enabled."""
+        """A brewing->ready transition happened.  Wake the screen and publish
+        the event to MQTT; a downstream consumer decides notification policy.
+        Fire-and-forget -- publish never raises into the tick."""
         self.wake(result.pot_state)
-        if not self.settings["slack_enabled"]:
-            return
-        url = self.machine.slack_webhook_url
-        if not url:
-            return
-        self._notify_slack(url, result)
-
-    def _notify_slack(self, url, result):
-        # Imported lazily so the app runs without requests on a dev box.
-        try:
-            import requests
-
-            ml = result.raw_grams or 0.0  # ~1 g per mL
-            msg = "{:.0f} mL of fresh coffee is ready in {}.".format(
-                ml, self.machine.location
-            )
-            requests.post(url, json={"text": msg}, timeout=5)
-        except Exception as e:
-            print("slack notify failed: {}".format(e), file=sys.stderr)
+        brewnotify.publish_ready(self.machine, result)
 
     # --- backlight inactivity dimming ---------------------------------
     def wake(self, pot=None):

@@ -4,12 +4,11 @@
 #   sudo install -m 0600 etc/config.toml.example /etc/brewcop/config.toml
 #   sudo $EDITOR /etc/brewcop/config.toml
 #
-# This file holds install-time facts (and a secret webhook), read once at
-# startup and never written at runtime -- so it is fine on the read-only
-# root. It is DISTINCT from the touchscreen-editable user settings
-# (stale timeout, pot tare/capacity, ...), which live in a writable JSON.
-#
-# Do NOT commit the real /etc/brewcop/config.toml -- it contains the secret.
+# This file holds install-time facts, read once at startup and never written
+# at runtime -- so it is fine on the read-only root. It is DISTINCT from the
+# touchscreen-editable user settings (pot tare/capacity, ...), which live in
+# a writable JSON. There is no secret here: notification policy and any
+# webhook secrets live in the downstream MQTT consumer, off this device.
 
 # Serial device for the Avery Berkel scale.
 #   "auto"                       -> autodetect (/dev/serial/by-id, /dev/ttyUSB*)
@@ -17,12 +16,15 @@
 #   "/dev/ttyUSB0"               -> simple but can change across reboots
 serial_port = "auto"
 
-# Slack webhook URL for "coffee is ready" notifications (a secret): this is
-# only WHERE messages go. WHETHER to send them is the runtime "Slack
-# announcements" toggle on the Settings screen (a user setting), which stays
-# off until the brew-detection logic is validated against real data.
-slack_webhook_url = ""
+# MQTT broker that `ready` events publish to. brewcop is notification-
+# agnostic: it just publishes to <mqtt_topic_prefix>/<location>/ready and a
+# separate consumer decides what to do (Slack, signage, telemetry).
+#   mqtt_host = ""   -> MQTT disabled; the app runs but publishes nothing
+#   mqtt_host = "mqtt.example.org"  -> point at the mosquitto broker
+mqtt_host = ""
+mqtt_port = 1883
+mqtt_topic_prefix = "brewcop"
 
-# Deployment location, used in the notification messages
-# (e.g. "... coffee is ready in B451.").
+# Deployment location, woven into the topic and event payload
+# (e.g. topic "brewcop/B451/ready").
 location = "B451"
