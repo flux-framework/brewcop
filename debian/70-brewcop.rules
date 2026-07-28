@@ -9,9 +9,15 @@
 // at higher priority.
 polkit.addRule(function(action, subject) {
     if (subject.user !== "brewcop") return;
-    // Power off / reboot the whole machine.
-    if (action.id == "org.freedesktop.login1.power-off" ||
-        action.id == "org.freedesktop.login1.reboot")
+    // Power off / reboot the whole machine.  logind picks a variant of the
+    // action by context: the base id normally, the "-multiple-sessions"
+    // variant when another login session exists (e.g. an admin is SSH'd in),
+    // and "-ignore-inhibit" when an inhibitor lock is held.  A deliberate
+    // button press should win in every case, so authorize the whole family
+    // (prefix match) for both power-off and reboot -- still scoped to the
+    // brewcop user, and NOT covering halt, which the button never issues.
+    if (action.id.indexOf("org.freedesktop.login1.power-off") == 0 ||
+        action.id.indexOf("org.freedesktop.login1.reboot") == 0)
         return polkit.Result.YES;
     // Restart just the app -- scoped to brewcop.service, not a blanket
     // manage-units grant over every systemd unit.
