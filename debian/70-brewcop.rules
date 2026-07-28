@@ -1,0 +1,21 @@
+// Authorize the unprivileged brewcop service user for exactly the three
+// actions the on-screen power button takes -- nothing broader.  The button
+// shells out to systemctl (see brewcop/app.py); logind/systemd defer the
+// authorization decision to polkit, and the service runs as User=brewcop with
+// no login seat, so without this rule those calls are denied.
+//
+// Installed under /usr/share/polkit-1/rules.d (a package path), so a local
+// admin can still override it from /etc/polkit-1/rules.d, which polkit reads
+// at higher priority.
+polkit.addRule(function(action, subject) {
+    if (subject.user !== "brewcop") return;
+    // Power off / reboot the whole machine.
+    if (action.id == "org.freedesktop.login1.power-off" ||
+        action.id == "org.freedesktop.login1.reboot")
+        return polkit.Result.YES;
+    // Restart just the app -- scoped to brewcop.service, not a blanket
+    // manage-units grant over every systemd unit.
+    if (action.id == "org.freedesktop.systemd1.manage-units" &&
+        action.lookup("unit") == "brewcop.service")
+        return polkit.Result.YES;
+});

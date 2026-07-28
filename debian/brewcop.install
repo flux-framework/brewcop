@@ -3,3 +3,8 @@
 # created out-of-band, so it is deliberately NOT a dpkg conffile (no secret
 # in the package, no upgrade prompts).
 etc/config.toml.example etc/brewcop/
+
+# polkit grant for the power button (poweroff/reboot/restart brewcop.service
+# as the brewcop user).  Under /usr, so not a dpkg conffile; numeric prefix
+# makes evaluation order explicit.  Admins override from /etc/polkit-1.
+debian/70-brewcop.rules usr/share/polkit-1/rules.d/

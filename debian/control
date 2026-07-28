@@ -21,6 +21,7 @@ Depends:
  python3-paho-mqtt,
  libmtdev1,
  libphidget22,
+ polkit,
 Description: touchscreen coffee monitor for the Technivorm at B451
  brewcop is a Kivy touchscreen app that watches a Moccamaster/Technivorm
  coffee machine.  It auto-detects brewing from the boiler current (a

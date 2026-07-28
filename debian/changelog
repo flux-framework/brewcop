@@ -6,5 +6,7 @@ brewcop (0.1.0-1) unstable; urgency=low
   * systemd service running as a dedicated brewcop system user.
   * Publishes brew "ready" events to MQTT (python3-paho-mqtt); notification
     policy lives in a downstream consumer, not in the app.
+  * On-screen power button (power off / reboot / restart app), authorized
+    for the brewcop user by a scoped polkit rule.
 
- -- Jim Garlick <garlick.jim@gmail.com>  Tue, 28 Jul 2026 08:57:49 -0700
+ -- Jim Garlick <garlick.jim@gmail.com>  Tue, 28 Jul 2026 10:24:00 -0700
