@@ -51,6 +51,7 @@ Press 'q' or Escape to quit.  Targets the Kivy 2.1.0 API (Bookworm).
 
 import argparse
 import os
+import subprocess
 import sys
 
 # Kivy parses sys.argv itself at import time; without this it would choke on
@@ -68,8 +69,8 @@ from kivy.metrics import dp, sp
 from kivy.uix.boxlayout import BoxLayout
 from kivy.uix.button import Button
 from kivy.uix.floatlayout import FloatLayout
-from kivy.uix.image import Image as ImageWidget
 from kivy.uix.label import Label
+from kivy.uix.modalview import ModalView
 from kivy.uix.scrollview import ScrollView
 from kivy.uix.screenmanager import ScreenManager, Screen, SlideTransition
 from kivy.uix.widget import Widget
@@ -85,10 +86,6 @@ from .currentsensor import open_current_sensor, NoCurrentSensor
 from .backlight import Backlight
 
 kivy.require("2.1.0")
-
-# Image assets live in ./images relative to this script (repo root).
-IMAGES_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "images")
-FLUX_MARK_PNG = os.path.join(IMAGES_DIR, "flux-mark.png")
 
 # --- palette -------------------------------------------------------------
 # "Serious" dark theme: charcoal ground, restrained ink, one blue accent
@@ -162,6 +159,121 @@ class FlatButton(Button):
             )
         else:
             self._bg_color.rgba = self._bg_rgba
+
+
+# --- power control -------------------------------------------------------
+# The three privileged actions the on-screen power button can take, mapped to
+# the systemctl command that performs each.  These are authorized for the
+# unprivileged `brewcop` service user by the polkit rule shipped in the deb
+# (see debian/brewcop.polkit); with no grant they are simply denied, which the
+# UI surfaces rather than crashing on.
+_SYSTEM_ACTIONS = {
+    "poweroff": ["systemctl", "poweroff"],
+    "reboot": ["systemctl", "reboot"],
+    "restart-app": ["systemctl", "restart", "brewcop.service"],
+}
+
+
+def _system_action(verb, dev_safe=False):
+    """Run a privileged power action, returning an error string or None.
+
+    `dev_safe` is set on windowed/mock dev runs so pressing the button on a
+    workstation logs the intended command instead of actually powering the box
+    off.  Failures (a missing polkit grant, systemctl absent) come back as a
+    short message for the caller to flash rather than raising.
+    """
+    argv = _SYSTEM_ACTIONS[verb]
+    if dev_safe:
+        print("power: [dev] would run: {}".format(" ".join(argv)), file=sys.stderr)
+        return None
+    try:
+        proc = subprocess.run(argv, check=False, capture_output=True, text=True)
+    except OSError as e:
+        return str(e)
+    if proc.returncode != 0:
+        # systemctl prints the polkit denial / failure reason on stderr.
+        return (proc.stderr or proc.stdout or "action failed").strip()
+    return None
+
+
+class PowerButton(FlatButton):
+    """A borderless button carrying the IEC 5009 power glyph, drawn in vector.
+
+    Matches the app's PNG-free style (see CarafeWidget): a near-full circle
+    with a gap at the top and a vertical stroke through that gap, redrawn in
+    canvas.after and kept in sync with a pos/size bind like `_fill`.
+    """
+
+    def __init__(self, **kwargs):
+        super().__init__(bg=BG, **kwargs)
+        with self.canvas.after:
+            self._glyph_color = Color(*ACCENT)
+            self._glyph_arc = Line(width=dp(2))
+            self._glyph_bar = Line(width=dp(2))
+        self.bind(pos=self._draw_glyph, size=self._draw_glyph)
+
+    def _draw_glyph(self, *_a):
+        # Center the glyph in the button; radius a bit under half the shorter
+        # side so the 2 dp stroke stays inside the tap target.
+        cx = self.center_x
+        cy = self.center_y
+        r = min(self.width, self.height) * 0.30
+        # Kivy circle angles are degrees clockwise from 12 o'clock, so an arc
+        # from 30..330 leaves a 60-degree gap centered on top for the stroke.
+        self._glyph_arc.circle = (cx, cy, r, 30, 330)
+        # Vertical stroke: from just above the circle down through the gap to
+        # a touch past center, the classic "I" of the power symbol.
+        self._glyph_bar.points = [cx, cy + r * 1.15, cx, cy + r * 0.15]
+
+
+class PowerMenu(ModalView):
+    """Confirm dialog for the power button: power off / reboot / restart app.
+
+    A single stray touch on the button only opens this; the destructive action
+    still needs a second, deliberate tap here.  `on_action(verb)` is invoked
+    with the chosen verb (one of _SYSTEM_ACTIONS) after the modal closes.
+    """
+
+    def __init__(self, on_action, **kwargs):
+        super().__init__(
+            size_hint=(None, None),
+            size=(dp(360), dp(320)),
+            background_color=(0, 0, 0, 0.6),
+            auto_dismiss=True,
+            **kwargs,
+        )
+        self._on_action = on_action
+        card = BoxLayout(orientation="vertical", padding=dp(20), spacing=dp(12))
+        _fill(card, PANEL, radius=dp(14))
+        prompt = Label(
+            text="Power",
+            color=INK,
+            font_size=sp(22),
+            bold=True,
+            size_hint_y=None,
+            height=dp(40),
+        )
+        card.add_widget(prompt)
+
+        def _choose(verb):
+            def _cb(*_a):
+                self.dismiss()
+                self._on_action(verb)
+
+            return _cb
+
+        for label, verb, bg, fg in (
+            ("Power off", "poweroff", RED, INK),
+            ("Reboot", "reboot", PANEL, INK),
+            ("Restart app", "restart-app", PANEL, ACCENT),
+        ):
+            b = FlatButton(text=label, bg=bg, fg=fg, font_size=sp(18))
+            b.bind(on_release=_choose(verb))
+            card.add_widget(b)
+        cancel = FlatButton(text="Cancel", bg=BG, fg=MUTED, font_size=sp(18))
+        cancel.bind(on_release=lambda *_a: self.dismiss())
+        card.add_widget(cancel)
+        self.add_widget(card)
 
 
 class CarafeWidget(Widget):
@@ -545,18 +657,17 @@ class HomeScreen(Screen):
         )
         title.bind(size=lambda w, s: setattr(w, "text_size", s))
         top.add_widget(title)
-        # Flux mark at the left (falls back to nothing if the asset is
-        # missing, so the layout still holds).
-        if os.path.exists(FLUX_MARK_PNG):
-            badge = ImageWidget(
-                source=FLUX_MARK_PNG,
-                size_hint=(None, None),
-                size=(dp(44), dp(44)),
-                allow_stretch=True,
-                keep_ratio=True,
-                pos_hint={"x": 0, "center_y": 0.5},
-            )
-            top.add_widget(badge)
+        # Power button in the upper-left (where the Flux mark used to sit): a
+        # single tap opens a confirm dialog, so it can't kill the unit by
+        # accident but the kiosk can still be shut down / rebooted / the app
+        # restarted without pulling the plug.
+        power = PowerButton(
+            size_hint=(None, None),
+            size=(dp(44), dp(44)),
+            pos_hint={"x": 0, "center_y": 0.5},
+        )
+        power.bind(on_release=lambda *_a: self._open_power_menu())
+        top.add_widget(power)
         gear = FlatButton(
             text="Settings",
             bg=BG,
@@ -738,6 +849,17 @@ class HomeScreen(Screen):
         # --mock only: advance canned states.
         self.app.source.advance()
         self.tick()
+
+    def _open_power_menu(self):
+        PowerMenu(on_action=self._do_power).open()
+
+    def _do_power(self, verb):
+        # Dev-safety: in windowed/mock runs (a workstation, not the kiosk) log
+        # the intended command instead of actually powering the box off.
+        dev_safe = self.app.windowed or self.app.mock
+        err = _system_action(verb, dev_safe=dev_safe)
+        if err:
+            self._flash("power: {}".format(err), seconds=4.0)
 
     def _flash(self, msg, seconds=2.0):
         # Briefly show a message on the status line, holding it against the
@@ -1052,9 +1174,10 @@ TICK_PERIOD = 0.5  # seconds between Home scale polls
 class BrewcopApp(App):
     title = "brewcop"
 
-    def __init__(self, mock=False, **kwargs):
+    def __init__(self, mock=False, windowed=False, **kwargs):
         super().__init__(**kwargs)
         self.mock = mock
+        self.windowed = windowed
 
     def build(self):
         # Config: machine facts (read-only) + user settings (writable).
@@ -1292,7 +1415,7 @@ def main(argv=None):
     args = parse_args(sys.argv[1:] if argv is None else argv)
     if not args.windowed:
         Window.fullscreen = "auto"
-    BrewcopApp(mock=args.mock).run()
+    BrewcopApp(mock=args.mock, windowed=args.windowed).run()
 
 
 if __name__ == "__main__":
