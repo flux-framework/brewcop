@@ -67,7 +67,7 @@ class CurrentSensor:
         threshold_a=DEFAULT_THRESHOLD_A,
     ):
         # Lazy import: only a real sensor needs the binding / C library.
-        from phidget22_min import VoltageInput
+        from .phidget22_min import VoltageInput
 
         self.threshold_a = threshold_a
         self._vin = VoltageInput()

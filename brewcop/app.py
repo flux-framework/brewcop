@@ -74,15 +74,15 @@ from kivy.uix.scrollview import ScrollView
 from kivy.uix.screenmanager import ScreenManager, Screen, SlideTransition
 from kivy.uix.widget import Widget
 
-import machineconfig
-import usersettings
-import potstate
-import brewsource
-import brewstate
-import brewnotify
-from scale import open_scale, NoScale
-from currentsensor import open_current_sensor, NoCurrentSensor
-from backlight import Backlight
+from . import machineconfig
+from . import usersettings
+from . import potstate
+from . import brewsource
+from . import brewstate
+from . import brewnotify
+from .scale import open_scale, NoScale
+from .currentsensor import open_current_sensor, NoCurrentSensor
+from .backlight import Backlight
 
 kivy.require("2.1.0")
 
@@ -1288,10 +1288,14 @@ def parse_args(argv):
     return p.parse_args(argv)
 
 
-if __name__ == "__main__":
-    args = parse_args(sys.argv[1:])
+def main(argv=None):
+    args = parse_args(sys.argv[1:] if argv is None else argv)
     if not args.windowed:
         Window.fullscreen = "auto"
     BrewcopApp(mock=args.mock).run()
+
+
+if __name__ == "__main__":
+    main()
 
 # vim: tabstop=4 shiftwidth=4 expandtab

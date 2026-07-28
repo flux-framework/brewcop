@@ -44,8 +44,8 @@ import time
 # Import the shared driver + config from the repo root (this script is in test/).
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 
-import scale as scale_mod  # noqa: E402
-import machineconfig  # noqa: E402
+from brewcop import scale as scale_mod  # noqa: E402
+from brewcop import machineconfig  # noqa: E402
 
 
 def parse_args():

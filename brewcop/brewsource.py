@@ -24,8 +24,8 @@ done here; poll() surfaces the "ready" event and the app publishes it to
 MQTT, where a downstream consumer decides policy.
 """
 
-import potstate
-from brains import Brains
+from . import potstate
+from .brains import Brains
 
 
 class PollResult:

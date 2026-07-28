@@ -26,7 +26,7 @@ import unittest
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 
-import brains  # noqa: E402
+from brewcop import brains  # noqa: E402
 
 
 BREW_A = 12.5  # a running boiler

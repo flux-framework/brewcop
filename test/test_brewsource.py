@@ -18,8 +18,8 @@ import unittest
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 
-import brewsource  # noqa: E402
-import potstate  # noqa: E402
+from brewcop import brewsource  # noqa: E402
+from brewcop import potstate  # noqa: E402
 
 
 SETTINGS = {
@@ -149,7 +149,7 @@ class TestScaleBrewSource(unittest.TestCase):
     def test_brew_cycle_auto_detected(self):
         # Boiler current drives the whole cycle -- no BREW button.  A sustained
         # draw arms brewing; boiler-off + a settled pour completes to ready.
-        import brains
+        from brewcop import brains
 
         clock = [1000.0]
         cur = ScriptedCurrentSensor(amps=BREW_A)
@@ -176,7 +176,7 @@ class TestScaleBrewSource(unittest.TestCase):
         # Drive a full brew to ready (age clock running), then RESET: the batch
         # returns to idle and the clock is gone.  RESET does NOT re-tare, so a
         # full pot left on the scale now reads "present", not "ready".
-        import brains
+        from brewcop import brains
 
         clock = [1000.0]
         cur = ScriptedCurrentSensor(amps=BREW_A)

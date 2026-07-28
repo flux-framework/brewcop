@@ -119,7 +119,7 @@ def open_voltage_input(args):
     # to the official Phidget22 package if it happens to be installed.  Both
     # expose the same VoltageInput method names, so nothing below changes.
     try:
-        from phidget22_min import VoltageInput
+        from brewcop.phidget22_min import VoltageInput
     except ImportError:
         from Phidget22.Devices.VoltageInput import VoltageInput
 

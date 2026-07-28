@@ -52,7 +52,7 @@ elapsed() gives coffee age while ready, else time in the current state.
 
 import time
 
-from scale import POT_TOLERANCE_G
+from .scale import POT_TOLERANCE_G
 
 
 # Boiler on/off detected from clamp current with hysteresis, so noise around

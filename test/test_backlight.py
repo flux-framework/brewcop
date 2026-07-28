@@ -19,7 +19,7 @@ import unittest
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 
-import backlight  # noqa: E402
+from brewcop import backlight  # noqa: E402
 
 
 def make_fake_backlight(root, name="10-0045", max_brightness=255, brightness=255):

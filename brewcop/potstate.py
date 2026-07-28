@@ -34,7 +34,7 @@ just carries a running age clock (reset by hand via the RESET button); the
 human reads the clock and decides.
 """
 
-from scale import POT_TOLERANCE_G
+from .scale import POT_TOLERANCE_G
 
 
 # Below this many grams of net contents a pot reads "empty".  A fixed band (no

@@ -19,7 +19,7 @@ import unittest
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 
-import brewstate  # noqa: E402
+from brewcop import brewstate  # noqa: E402
 
 
 class TestBrewState(unittest.TestCase):
