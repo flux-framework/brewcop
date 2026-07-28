@@ -56,8 +56,8 @@ class ScaleBrewSource:
 
     `scale` is any object with .poll(), .weight_is_valid, and .weight
     (grams, pre-tare) -- i.e. scale.Scale or scale.NoScale.  `settings` is a
-    mapping providing pot_tare_g, pot_capacity_ml, stale_hours (the user
-    settings; config is the single source of truth).  `current_sensor`
+    mapping providing pot_tare_g, pot_capacity_ml (the user settings; config
+    is the single source of truth).  `current_sensor`
     (optional) is any object with an .amps property -- i.e.
     currentsensor.CurrentSensor or NoCurrentSensor; None means no sensor.
     Brewing is detected from boiler current, so no BREW button is needed.
@@ -130,13 +130,6 @@ class ScaleBrewSource:
         # drives ready-detection (the pour settling) and the fill level.
         net = potstate.net_contents_g(raw, self._settings["pot_tare_g"])
         event = self._brains.store(net, amps=amps)
-
-        stale_s = float(self._settings["stale_hours"]) * 3600.0
-        # The current ready batch is itself stale -> draw the pot empty (stale
-        # coffee shouldn't look drinkable).  The biohazard is no longer a
-        # latch: derive() recomputes it each tick from state + age + contents,
-        # so it clears on its own once the pot is emptied.
-        current_stale = self._brains.is_stale(stale_s)
         self._maybe_persist()
 
         pot = potstate.derive(
@@ -145,7 +138,6 @@ class ScaleBrewSource:
             brew_state=self._brains.state,
             elapsed_s=self._brains.elapsed(),
             config=self._settings,
-            stale=current_stale,
         )
         self._last_pot = pot
         return PollResult(
@@ -172,6 +164,13 @@ class ScaleBrewSource:
             raw = None
         if raw is not None:
             self._settings["pot_tare_g"] = raw
+        self._brains.reset()
+        self._maybe_persist()
+
+    def reset(self):
+        """RESET pressed: stop the age clock and return to idle WITHOUT
+        re-taring.  Unlike zero(), this doesn't touch the carafe tare -- it
+        just clears the completed batch so the running clock goes away."""
         self._brains.reset()
         self._maybe_persist()
 
@@ -219,6 +218,9 @@ class MockBrewSource:
 
     # Transition methods are no-ops in mock (states are canned + cycled).
     def zero(self):
+        pass
+
+    def reset(self):
         pass
 
 

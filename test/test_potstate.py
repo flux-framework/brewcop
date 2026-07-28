@@ -24,13 +24,11 @@ import potstate  # noqa: E402
 CONFIG = {
     "pot_tare_g": 795,
     "pot_capacity_ml": 1250,
-    "stale_hours": 4.0,
 }
-STALE_S = CONFIG["stale_hours"] * 3600.0
 
 
-def derive(raw_g, brew_state="ready", elapsed=0, valid=True, stale=False):
-    return potstate.derive(raw_g, valid, brew_state, elapsed, CONFIG, stale=stale)
+def derive(raw_g, brew_state="ready", elapsed=0, valid=True):
+    return potstate.derive(raw_g, valid, brew_state, elapsed, CONFIG)
 
 
 class TestNetContents(unittest.TestCase):
@@ -59,87 +57,58 @@ class TestDerive(unittest.TestCase):
         self.assertEqual(s.key, "no_pot")
 
     def test_empty_pot(self):
-        # carafe present (at tare), no coffee
-        self.assertEqual(derive(795).key, "empty")
+        # carafe present (at tare), no coffee, no active batch
+        self.assertEqual(derive(795, brew_state="idle").key, "empty")
         # just under the fixed empty threshold
-        self.assertEqual(derive(795 + potstate.EMPTY_THRESH_G - 5).key, "empty")
+        self.assertEqual(
+            derive(795 + potstate.EMPTY_THRESH_G - 5, brew_state="idle").key, "empty"
+        )
 
-    def test_fresh(self):
-        # full-ish pot, freshly ready
+    def test_ready_runs_age_clock(self):
+        # a ready batch carries the running age clock (age_s set) and shows
+        # its level; no freshness judgment is made here
         s = derive(795 + 900, brew_state="ready", elapsed=60)
-        self.assertEqual(s.key, "fresh")
-        self.assertFalse(s.expired)
+        self.assertEqual(s.key, "ready")
+        self.assertEqual(s.age_s, 60)
         self.assertAlmostEqual(s.fill, 900 / 1250, places=3)
         self.assertIn("L", s.text)
 
+    def test_ready_stays_ready_when_old(self):
+        # no staleness: an old ready pot is still just "ready" with a bigger
+        # clock -- the human reads it and decides
+        s = derive(795 + 600, brew_state="ready", elapsed=10 * 3600)
+        self.assertEqual(s.key, "ready")
+        self.assertEqual(s.age_s, 10 * 3600)
+
+    def test_ready_survives_emptying(self):
+        # KEY behavior: pour the coffee out (net at/below the empty band) but
+        # the batch is still "ready" -- only RESET stops the clock, so an
+        # emptied-but-not-reset carafe keeps counting up.
+        s = derive(795, brew_state="ready", elapsed=1800)
+        self.assertEqual(s.key, "ready")
+        self.assertEqual(s.age_s, 1800)
+
     def test_present_when_idle_with_coffee(self):
         # coffee on the scale but no active batch (idle) -> "present":
-        # level shown, no freshness claim, not expired
+        # level shown, no age claim (no clock)
         s = derive(795 + 800, brew_state="idle", elapsed=0)
         self.assertEqual(s.key, "present")
-        self.assertFalse(s.expired)
+        self.assertIsNone(s.age_s)
         self.assertGreater(s.fill, 0)
-
-    def test_present_never_goes_stale(self):
-        # an idle pot with coffee never becomes stale/expired on its own
-        # (staleness is the ready batch's age, surfaced via the stale flag)
-        s = derive(795 + 600, brew_state="idle", elapsed=STALE_S * 10)
-        self.assertEqual(s.key, "present")
-        self.assertFalse(s.expired)
 
     def test_brewing(self):
         s = derive(795 + 400, brew_state="brewing", elapsed=30)
         self.assertEqual(s.key, "brewing")
-        self.assertFalse(s.expired)
 
-    def test_aging(self):
-        # past half the stale window but not stale
-        s = derive(795 + 700, brew_state="ready", elapsed=STALE_S * 0.6)
-        self.assertEqual(s.key, "aging")
-        self.assertFalse(s.expired)
-
-    def test_stale_with_coffee_shows_biohazard(self):
-        # stale flag + coffee still in the pot -> empty carafe + biohazard
-        s = derive(795 + 600, brew_state="ready", elapsed=STALE_S + 10, stale=True)
-        self.assertEqual(s.key, "stale")
-        self.assertTrue(s.expired)
-        self.assertTrue(s.needs_clean)
-        self.assertIn("dump", s.text.lower())
-
-    def test_not_stale_stays_aging_even_when_old(self):
-        # without the stale flag, an old ready pot is at most "aging", never
-        # the stale/biohazard state (staleness is Brains' call via the flag)
-        s = derive(795 + 600, brew_state="ready", elapsed=STALE_S + 10, stale=False)
-        self.assertNotEqual(s.key, "stale")
-        self.assertFalse(s.expired)
-
-    def test_biohazard_clears_when_coffee_poured_out(self):
-        # The key change: pouring the stale coffee out (net below the empty
-        # band) clears the biohazard on its own -- no CLEAN press.  Even with
-        # the stale flag still set, an empty pot reads "empty", not "stale".
-        s = derive(795, brew_state="ready", elapsed=STALE_S + 10, stale=True)
+    def test_idle_empty_pot(self):
+        # an empty pot with no active batch is just "empty"
+        s = derive(795, brew_state="idle", elapsed=0)
         self.assertEqual(s.key, "empty")
-        self.assertFalse(s.expired)
-        self.assertFalse(s.needs_clean)
 
     def test_fill_clamped(self):
         # overfull reading clamps to 1.0
         s = derive(795 + 2000, brew_state="ready", elapsed=10)
         self.assertEqual(s.fill, 1.0)
-
-    def test_clean_empty_pot_not_expired(self):
-        # an empty, not-stale pot is just "empty" (no nag)
-        s = derive(795, brew_state="idle", elapsed=STALE_S * 5, stale=False)
-        self.assertEqual(s.key, "empty")
-        self.assertFalse(s.expired)
-        self.assertFalse(s.needs_clean)
-
-    def test_no_pot_has_no_biohazard(self):
-        # pot removed -> nothing to nag over; needs_clean is off (it re-asserts
-        # on its own when a stale pot with coffee returns)
-        s = derive(0, brew_state="ready", elapsed=STALE_S + 10, stale=True)
-        self.assertEqual(s.key, "no_pot")
-        self.assertFalse(s.needs_clean)
 
     def test_config_capacity_drives_fill(self):
         # smaller configured capacity -> larger fill fraction for same grams

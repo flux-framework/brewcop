@@ -35,12 +35,10 @@ class TestUserSettings(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             p = os.path.join(d, "sub", "config.json")  # dir created on save
             s = usersettings.UserSettings(p)
-            s["stale_hours"] = 6.5
             s["slack_enabled"] = True
             s["pot_capacity_ml"] = 1000
             s.save()
             s2 = usersettings.UserSettings(p)
-            self.assertEqual(s2["stale_hours"], 6.5)
             self.assertEqual(s2["slack_enabled"], True)
             self.assertEqual(s2["pot_capacity_ml"], 1000)
             # untouched key keeps its default

@@ -43,7 +43,8 @@ fixed SETTLE_FALLBACK_S after boiler-off.  With no current sensor (amps is
 None) the boiler never reads "on", so we never leave idle -- the pot simply
 shows as "present", the safe degradation.
 
-reset() is the Zero-empty-pot action: it tares and returns to a clean idle.
+reset() returns to a clean idle -- it backs both the Zero-empty-pot action
+(after re-taring) and the RESET button (which just stops the age clock).
 
 store() returns "ready" on the transition into ready (the point to notify).
 elapsed() gives coffee age while ready, else time in the current state.
@@ -156,7 +157,7 @@ class Brains:
                 return self._become_ready()
             return None
 
-        # ready: aging is handled by elapsed()/is_stale(); nothing to advance.
+        # ready: the age clock is handled by elapsed(); nothing to advance.
         return None
 
     def _become_ready(self):
@@ -166,8 +167,9 @@ class Brains:
         return "ready"
 
     def reset(self):
-        """Zero-empty-pot pressed: pot tared and dealt with, return to a
-        clean idle (clears any ready batch and brew tracking)."""
+        """Return to a clean idle: clears any ready batch and brew tracking.
+        Backs both the ZERO action (after re-taring) and the RESET button
+        (which just stops the age clock without touching the tare)."""
         self.ready_time = None
         self._boiler_on = False
         self._boiler_on_since = None
@@ -189,16 +191,6 @@ class Brains:
         rather than waiting out BREW_ON_DEBOUNCE_S for the state to reach
         'brewing'."""
         return self._boiler_on
-
-    def is_stale(self, stale_s, now=None):
-        """True if the current ready batch has aged past the stale threshold.
-        A pure freshness query; there is no latch -- the biohazard condition
-        is recomputed each tick from state + age + contents (see potstate)."""
-        if self.state != "ready" or self.ready_time is None:
-            return False
-        if now is None:
-            now = self._now()
-        return (now - self.ready_time) >= stale_s
 
     def elapsed(self, now=None):
         """

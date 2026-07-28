@@ -15,18 +15,19 @@ brewcop touchscreen app.
 
 A Kivy touchscreen coffee monitor for the Technivorm at B451.  Reads the
 Avery Berkel scale and an i-Snail clamp on the boiler, and shows a live
-carafe (level + freshness, with a blinking biohazard for a stale pot).
+carafe (level + a running age clock once a batch is ready).
 
 Brewing is detected automatically from boiler current (no BREW button, no
 weight inference): a sustained draw arms brewing, and the pour settling
-completes the batch to ready (see brains).  The batch then ages until the
-coffee is poured out.
+completes the batch to ready (see brains).  A ready batch then runs an
+HH:MM:SS age clock that only the RESET button clears -- freshness is a human
+call, not the appliance's.
 
-A fixed action rail (ZERO / WEIGH) sits on the right of every screen; the
-layout never moves, so the verbs are always in the same place.
+A fixed action rail (WEIGH / ZERO / RESET) sits on the right of every screen;
+the layout never moves, so the verbs are always in the same place.
 
 Screens (three total):
-  Home     -- Flux mark + wordmark, the live carafe, and a pot-status line.
+  Home     -- Flux mark + wordmark, the live carafe with its age clock.
   Weigh    -- live scale weight, g/oz units toggle, tare, dosing hint, Back.
   Settings -- Slack on/off + steppers for tunable parameters (usersettings).
 
@@ -61,7 +62,6 @@ import kivy
 
 from kivy.app import App
 from kivy.clock import Clock
-from kivy.core.image import Image as CoreImage
 from kivy.core.window import Window
 from kivy.graphics import Color, RoundedRectangle, Rectangle, Line, Mesh, Ellipse
 from kivy.metrics import dp, sp
@@ -87,7 +87,6 @@ kivy.require("2.1.0")
 
 # Image assets live in ./images relative to this script (repo root).
 IMAGES_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "images")
-BIOHAZARD_PNG = os.path.join(IMAGES_DIR, "biohazard.png")
 FLUX_MARK_PNG = os.path.join(IMAGES_DIR, "flux-mark.png")
 
 # --- palette -------------------------------------------------------------
@@ -98,10 +97,9 @@ PANEL = (0.14, 0.16, 0.19, 1)  # slightly raised card
 INK = (0.90, 0.92, 0.94, 1)  # primary text
 MUTED = (0.55, 0.60, 0.66, 1)  # secondary text
 ACCENT = (0.29, 0.62, 1.00, 1)  # flux-ish blue
-GREEN = (0.36, 0.78, 0.45, 1)  # fresh / ready
-AMBER = (0.95, 0.72, 0.25, 1)  # aging / stale nag
+GREEN = (0.36, 0.78, 0.45, 1)  # coffee ready
 RED = (0.92, 0.35, 0.35, 1)  # empty / kaput
-HAZARD = (0.95, 0.85, 0.10, 1)  # biohazard yellow (stale warning)
+HAZARD = (0.95, 0.85, 0.10, 1)  # warning yellow (transient flash messages)
 GRAPHITE = (0.16, 0.17, 0.20, 1)  # carafe lid/handle/base (dark plastic;
 # dark, but not pure black so it still
 # reads against the charcoal background)
@@ -168,10 +166,11 @@ class FlatButton(Button):
 class CarafeWidget(Widget):
     """A stylized Technivorm thermal carafe that fills with coffee.
 
-    `fill` is 0..1 (fraction full).  `coffee_rgba` colors the liquid (we
-    tint it by freshness elsewhere: green fresh -> amber aging).  When
-    `expired` is True and there is still coffee, a blinking biohazard symbol
-    is overlaid as a "someone left the old pot" nag.
+    `fill` is 0..1 (fraction full).  `coffee_rgba` colors the liquid.  Once a
+    batch is ready the carafe carries a running HH:MM:SS age clock centered in
+    the body (driven by `age_s`); while the boiler is running a rain cloud
+    over the lid rains coffee into the pot instead.  The clock yields to the
+    cloud, so the instant a new brew starts the timer disappears.
 
     The carafe is (necessarily) a stylized infographic: the real Moccamaster
     thermal carafe is opaque brushed steel, so the coffee level is shown as
@@ -186,33 +185,24 @@ class CarafeWidget(Widget):
         super().__init__(**kwargs)
         self._fill = 0.0
         self._coffee = GREEN
-        self._expired = False
         self._blink_on = True
         self._blink_ev = None
         self._body = None  # geometry cached by _redraw
-        # Age clock shown inside the body while coffee is fresh/aging (the
-        # biohazard takes over once stale).
-        self._age_text = ""
-        self._age_s = None  # raw age seconds for the smiley clock (H:MM)
-        self._needs_clean = False  # stale + coffee present -> biohazard
+        # Running age clock (HH:MM:SS) shown centered in the body once a batch
+        # is ready; suppressed while brewing (the rain cloud takes over).
+        self._age_s = None  # raw age seconds (None -> no clock)
         self._brewing = False  # in-progress brew -> rain-cloud icon
         self._age_label = Label(
             text="",
-            font_size=sp(30),
+            font_size=sp(34),
             bold=True,
-            color=(1, 1, 1, 0.92),
+            color=(1, 1, 1, 0.95),
             size_hint=(None, None),
             halign="center",
             valign="middle",
         )
         self._age_label.bind(size=lambda w, s: setattr(w, "text_size", s))
         self.add_widget(self._age_label)
-        # Load the biohazard PNG once; tolerate it being absent (fall back to
-        # no image -- the caption still conveys the warning).
-        try:
-            self._hazard_tex = CoreImage(BIOHAZARD_PNG).texture
-        except Exception:
-            self._hazard_tex = None
         self.bind(pos=self._redraw, size=self._redraw)
 
     # --- public state --------------------------------------------------
@@ -220,24 +210,16 @@ class CarafeWidget(Widget):
         self,
         fill,
         coffee_rgba,
-        expired,
-        age_text="",
         age_s=None,
-        needs_clean=False,
         brewing=False,
     ):
         self._fill = max(0.0, min(1.0, fill))
         self._coffee = coffee_rgba
-        self._expired = expired  # current batch stale -> draw the body empty
-        self._age_text = age_text  # shown inside the body while fresh/aging
-        self._age_s = age_s  # raw seconds; drives the smiley clock (None=off)
-        self._needs_clean = needs_clean  # stale + coffee present -> biohazard
+        self._age_s = age_s  # raw seconds; drives the count-up clock (None=off)
         self._brewing = brewing  # in-progress brew -> rain-cloud icon
-        # The blink clock drives two animations: the biohazard reminder (blinks
-        # whenever a stale pot still has coffee in it) and the brewing
-        # rain-cloud's falling drops.  Run it if either is active.
-        show_hazard = needs_clean and self._fill > 0.02
-        self._set_blinking(show_hazard or brewing)
+        # The blink clock drives the brewing rain-cloud's falling drops; run it
+        # only while brewing.
+        self._set_blinking(brewing)
         self._redraw()
 
     def _set_blinking(self, on):
@@ -328,11 +310,8 @@ class CarafeWidget(Widget):
             self._poly(body_pts)
 
             # --- coffee fill: a trapezoidal slice from the base up, so the
-            # liquid follows the body taper (wider at the bottom).  When the
-            # pot is expired we deliberately draw it EMPTY (no fill): brown
-            # just looks like coffee, so we let the biohazard symbol in an
-            # empty steel carafe carry the "don't drink this" message. ---
-            if self._fill > 0.01 and not self._expired:
+            # liquid follows the body taper (wider at the bottom). ---
+            if self._fill > 0.01:
                 fh = fill_max * self._fill
                 yb = by + inset
                 yt = yb + fh
@@ -391,72 +370,37 @@ class CarafeWidget(Widget):
                 ]
             )
 
-        # Biohazard overlay: a stale batch with coffee still in the pot
-        # (needs_clean).  It is recomputed each tick, so it blinks over a stale
-        # pot and clears itself the moment the coffee is poured out.
-        if self._needs_clean and self._fill > 0.02:
-            body_cy = by + body_h * 0.42
-            self._draw_hazard(cx, body_cy, min(top_w, base_w), body_h)
-
         # Brewing: a rain-cloud ABOVE the carafe, drops falling down into the
         # lid -- reads as the machine raining coffee into the pot.  Sits in the
         # headroom over the lid; drops fall from the cloud down to the pour
-        # spout.  Immediate feedback the moment the boiler is sensed running;
-        # yields to the biohazard just like the smiley does.
-        if self._brewing and not self._needs_clean:
+        # spout.  Immediate feedback the moment the boiler is sensed running.
+        if self._brewing:
             lid_top = ly + lid_h
             head = (y + h) - lid_top  # free space above the lid
             cloud_cy = lid_top + head * 0.62  # cloud sits high in the headroom
             self._draw_brewing(cx, cloud_cy, top_w * 1.25, lid_top)
 
-        # Fresh/aging coffee: draw a smiley in the SAME spot the biohazard
-        # would go (the happy counterpart to "gone bad").  Below it, an elapsed
-        # clock in H:MM.  The biohazard takes precedence: while it is up (stale
-        # coffee still in the pot), no smiley.
-        if self._age_text and not self._needs_clean:
-            body_cy = by + body_h * 0.42
-            self._draw_smiley(cx, body_cy, min(top_w, base_w), body_h)
-            if self._age_s is not None and self._age_s >= 60:
-                self._age_label.text = self._fmt_clock(self._age_s)
-                self._age_label.size = (min(top_w, base_w), dp(36))
-                # sit the clock just below the smiley
-                self._age_label.pos = (
-                    cx - min(top_w, base_w) / 2,
-                    body_cy
-                    - min(min(top_w, base_w) * 0.72, body_h * 0.44) / 2
-                    - dp(34),
-                )
-                self._age_label.opacity = 1
-            else:
-                self._age_label.opacity = 0
+        # Ready coffee: a running HH:MM:SS age clock centered in the body.  It
+        # yields to the rain cloud -- when a new brew's heater fires (brewing),
+        # the clock disappears in lockstep with the rain starting, so the two
+        # never show together.
+        if self._age_s is not None and not self._brewing:
+            body_cy = by + body_h * 0.46
+            side = min(top_w, base_w)
+            self._age_label.text = self._fmt_clock(self._age_s)
+            self._age_label.size = (side * 1.4, dp(44))
+            self._age_label.pos = (cx - side * 0.7, body_cy - dp(22))
+            self._age_label.opacity = 1
         else:
             self._age_label.opacity = 0
 
     @staticmethod
     def _fmt_clock(seconds):
-        """Elapsed time as H:MM (e.g. 0:05, 1:23) for the smiley clock."""
-        m = int(max(0, seconds)) // 60
-        return "{}:{:02d}".format(m // 60, m % 60)
-
-    def _draw_smiley(self, cxc, cyc, ref_w, ref_h):
-        """Happy face inside the carafe body -- the fresh-coffee counterpart to
-        the biohazard, drawn at the same location.  `cxc, cyc` is the center."""
-        side = min(ref_w * 0.72, ref_h * 0.44)
-        r = side / 2.0
-        lw = dp(3)
-        with self.canvas.before:
-            Color(*INK)
-            # face circle (Line ellipse via a rounded... use Line circle)
-            Line(circle=(cxc, cyc, r), width=lw)
-            # eyes
-            eye_r = r * 0.12
-            ey = cyc + r * 0.28  # up (Kivy y is up)
-            for ex in (cxc - r * 0.34, cxc + r * 0.34):
-                Ellipse(pos=(ex - eye_r, ey - eye_r), size=(eye_r * 2, eye_r * 2))
-            # smile: lower arc (Kivy Line circle angles in degrees, 0 at 12
-            # o'clock, clockwise; 180 is the bottom).  120..240 sweeps a
-            # symmetric bottom arc -> an upturned smile.
-            Line(circle=(cxc, cyc + r * 0.05, r * 0.55, 120, 240), width=lw)
+        """Elapsed time as H:MM:SS (e.g. 0:00:05, 2:03:41) for the age clock."""
+        s = int(max(0, seconds))
+        h, rem = divmod(s, 3600)
+        m, sec = divmod(rem, 60)
+        return "{}:{:02d}:{:02d}".format(h, m, sec)
 
     def _draw_brewing(self, cxc, ccy, ref_w, rain_to_y):
         """Rain-cloud ABOVE the carafe -- the brewing counterpart to the smiley:
@@ -519,19 +463,6 @@ class CarafeWidget(Widget):
             indices += [0, i, nxt]
         Mesh(vertices=verts, indices=indices, mode="triangles")
 
-    def _draw_hazard(self, cxc, cyc, ref_w, ref_h):
-        # Blinking biohazard symbol placed INSIDE the carafe body.  No scrim
-        # and no caption widget (the Home status line already says "Stale
-        # coffee - please dump"); the yellow trefoil (transparent PNG) sits
-        # in the empty steel body.  `cxc, cyc` is the symbol center.
-        if self._blink_on and self._hazard_tex is not None:
-            side = min(ref_w * 0.86, ref_h * 0.5)
-            sx = cxc - side / 2.0
-            sy = cyc - side / 2.0
-            with self.canvas.before:
-                Color(1, 1, 1, 1)  # texture already carries its own color
-                Rectangle(texture=self._hazard_tex, pos=(sx, sy), size=(side, side))
-
 
 class Header(BoxLayout):
     """Small top bar: back button (optional) + screen title."""
@@ -563,34 +494,28 @@ class Header(BoxLayout):
 
 
 # --- Home ----------------------------------------------------------------
-# Faked physical pot states, cycled by tapping the status card.  These
-# reflect what is physically on the scale, NOT any monitoring session --
-# so a stale pot keeps showing here (a "someone dump the old pot" nag)
-# even after the brew session's 3h timeout.
-# Each faked state: (key, text color, status text, carafe fill 0..1,
-# coffee color, expired?).  fill<0 means "no carafe on the scale".
-# Per-state text color for the Home status line, keyed by PotState.key.
+# Per-state text color for the Home status line, keyed by PotState.key.  A
+# ready batch shows green; there is no longer a staleness color (the human
+# reads the running age clock and decides).
 STATE_COLOR = {
     "no_pot": MUTED,
     "empty": MUTED,
     "present": INK,  # coffee present, age unknown
-    "fresh": GREEN,
-    "aging": AMBER,
     "brewing": ACCENT,
-    "stale": AMBER,
+    "ready": GREEN,
 }
 
 
 # Canned states for --mock mode (tap the carafe to cycle through them).
 def mock_states():
     return [
-        potstate.PotState("no_pot", "No pot on scale", 0.0, False),
-        potstate.PotState("empty", "Empty pot", 0.02, False),
-        potstate.PotState("present", "Coffee: ~0.94 L - age unknown", 0.75, False),
-        potstate.PotState("fresh", "Coffee: ~0.94 L - fresh (12 min)", 0.75, False),
-        potstate.PotState("brewing", "Brewing - 3 min", 0.40, False),
-        potstate.PotState("aging", "Coffee: ~0.70 L - aging (2h 10m)", 0.56, False),
-        potstate.PotState("stale", "Stale coffee - please dump (4h 20m)", 0.60, True),
+        potstate.PotState("no_pot", "No pot on scale", 0.0),
+        potstate.PotState("empty", "Empty pot", 0.02),
+        potstate.PotState("present", "Coffee: ~0.94 L", 0.75),
+        potstate.PotState("brewing", "Brewing - 3 min", 0.40),
+        potstate.PotState(
+            "ready", "Coffee: ~0.94 L - 2h 10m", 0.75, age_s=2 * 3600 + 10 * 60 + 42
+        ),
     ]
 
 
@@ -666,7 +591,7 @@ class HomeScreen(Screen):
         # the raw sensor readouts stacked together on the right -- weight on
         # top, live boiler current directly below it (one "source of truth"
         # block rather than split across the row).
-        statusbar = FloatLayout(size_hint_y=None, height=dp(40))
+        statusbar = FloatLayout(size_hint_y=None, height=dp(60))
         self.status = Label(
             text="",
             font_size=sp(20),
@@ -729,10 +654,24 @@ class HomeScreen(Screen):
             valign="middle",
             size_hint=(None, None),
             size=(dp(110), dp(20)),
-            pos_hint={"x": 0, "y": 0},
+            pos_hint={"x": 0, "center_y": 0.5},
         )
         self.delta_lbl.bind(size=lambda w, s: setattr(w, "text_size", s))
         statusbar.add_widget(self.delta_lbl)
+        # Coffee volume in mL (net contents / 1.01 g per mL), a third left row
+        # below tare and delta.  Floored at zero -- no negative coffee.
+        self.coffee_lbl = Label(
+            text="",
+            color=MUTED,
+            font_size=sp(16),
+            halign="left",
+            valign="middle",
+            size_hint=(None, None),
+            size=(dp(110), dp(20)),
+            pos_hint={"x": 0, "y": 0},
+        )
+        self.coffee_lbl.bind(size=lambda w, s: setattr(w, "text_size", s))
+        statusbar.add_widget(self.coffee_lbl)
         root.add_widget(statusbar)
 
         # In --mock mode only, a strip to advance the canned states.
@@ -749,7 +688,7 @@ class HomeScreen(Screen):
             root.add_widget(cycle)
 
         self.add_widget(root)
-        self._pot = potstate.PotState("no_pot", "", 0.0, False)
+        self._pot = potstate.PotState("no_pot", "", 0.0)
         self.tick()
 
     def tick(self, *_a):
@@ -777,10 +716,14 @@ class HomeScreen(Screen):
         # (NoCurrentSensor reads None) rather than showing a fake 0.
         if result.amps is not None:
             self.amps_lbl.text = "{:.1f} A".format(result.amps)
-        # Left block: stored tare + live delta from it (mirrors weight/amps).
+        # Left block: stored tare, live delta from it, and the coffee volume
+        # that delta implies (mirrors the weight/amps block on the right).
         tare = self.app.settings["pot_tare_g"]
+        net = self._last_grams - tare
         self.tare_lbl.text = "tare {:.0f} g".format(tare)
-        self.delta_lbl.text = "Δ {:+.0f} g".format(self._last_grams - tare)
+        self.delta_lbl.text = "Δ {:+.0f} g".format(net)
+        # Coffee volume: net grams at 1.01 g/mL, floored at zero.
+        self.coffee_lbl.text = "coffee {:.0f} mL".format(max(0.0, net) / 1.01)
 
         # Notify + wake on the brewing->ready transition (app gates Slack).
         if result.event == "ready":
@@ -809,43 +752,33 @@ class HomeScreen(Screen):
         Clock.schedule_once(_end, seconds)
 
     def _render(self, pot, boiler_on=False):
-        # Two carafe signals: `expired` empties the body when the current batch
-        # is stale (stale coffee shouldn't look drinkable); `needs_clean` drives
-        # the biohazard reminder (stale + coffee still in the pot), recomputed
-        # each tick so it clears itself once the pot is emptied.
-        expired = pot.expired
-        # No persistent status text: the carafe (fill + smiley/clock +
-        # biohazard) and the weight readout carry the state visually.  The
-        # status label is used only for transient flash messages; clear it when
-        # not flashing.
+        # No persistent status text: the carafe (fill + age clock / rain cloud)
+        # and the weight readout carry the state visually.  The status label is
+        # used only for transient flash messages; clear it when not flashing.
         if not self._flashing:
             self.status.text = ""
 
         # Always draw the carafe (even with no pot on the scale it shows as an
-        # empty carafe -- the fixed frame the fill relates to).  While
-        # fresh/aging (and not stale) the carafe shows a smiley plus an H:MM
-        # clock once a minute has passed; age_text is just the on/off marker
-        # for that, age_s drives the clock.  With no pot on the scale, ghost
-        # the whole carafe back so it reads as absent, not present-and-empty.
+        # empty carafe -- the fixed frame the fill relates to).  A ready batch
+        # carries a running age clock (age_s drives it).  With no pot on the
+        # scale, ghost the whole carafe back so it reads as absent, not
+        # present-and-empty.
         self.carafe.opacity = 0.35 if pot.key == "no_pot" else 1.0
-        coffee = AMBER if pot.key == "aging" else GREEN
-        age_text = pot.key if pot.key in ("fresh", "aging") else ""
         # Show the rain cloud whenever the heater is drawing current, not just
         # once the state machine has armed "brewing" -- boiler_on leads the
         # brewing state by BREW_ON_DEBOUNCE_S, so the rain starts the instant
         # the Moccamaster switches on, and keeps falling through the post-boiler
-        # settle until the batch goes ready.
+        # settle until the batch goes ready.  The age clock yields to the cloud
+        # (CarafeWidget suppresses it while brewing), so a re-brew makes the
+        # timer vanish the moment the rain begins.
         brewing = boiler_on or pot.key == "brewing"
         self.carafe.set_state(
             pot.fill,
-            coffee,
-            expired,
-            age_text=age_text,
+            GREEN,
             age_s=pot.age_s,
-            needs_clean=pot.needs_clean,
             brewing=brewing,
         )
-        # Actions live in the app-level rail (ZERO / WEIGH); nothing to do here.
+        # Actions live in the app-level rail (WEIGH / ZERO / RESET).
 
 
 # --- Weigh ---------------------------------------------------------------
@@ -1100,17 +1033,6 @@ class SettingsScreen(Screen):
         rows.bind(minimum_height=rows.setter("height"))
 
         rows.add_widget(ToggleRow("Slack announcements", config, "slack_enabled"))
-        rows.add_widget(
-            StepperRow(
-                "Stale timeout",
-                config,
-                "stale_hours",
-                1.0,
-                8.0,
-                0.5,
-                lambda v: "{:.1f} h".format(v),
-            )
-        )
         # Pot tare and empty threshold are no longer tunable here: the ZERO
         # button captures an accurate tare per brew (persisted), and the empty
         # threshold is a fixed constant now that the tare is trustworthy.
@@ -1213,10 +1135,11 @@ class BrewcopApp(App):
             Window.bind(on_key_down=self._on_key_down)
             Window.bind(on_touch_down=self._on_touch)
 
-        # Fixed action rail (ZERO / WEIGH), present on every screen.  Brewing
-        # is auto-detected, so there is no BREW or CLEAN button; the two verbs
-        # never move (spatial muscle memory).  Built BEFORE the screens because
-        # HomeScreen's first tick() calls refresh_rail(), which touches these.
+        # Fixed action rail (WEIGH / ZERO / RESET), present on every screen.
+        # Brewing is auto-detected, so there is no BREW or CLEAN button; the
+        # verbs never move (spatial muscle memory).  Built BEFORE the screens
+        # because HomeScreen's first tick() calls refresh_rail(), which touches
+        # these.
         rail = BoxLayout(
             orientation="vertical",
             spacing=dp(12),
@@ -1242,8 +1165,20 @@ class BrewcopApp(App):
             halign="center",
         )
         self._weigh_btn.bind(on_release=lambda *_a: self._go("weigh"))
-        # WEIGH on top (the everyday verb), ZERO below it (occasional setup).
-        for b in (self._weigh_btn, self._zero_btn):
+        # RESET stops the running age clock (returns to idle) without re-taring
+        # -- the manual "this batch is done being tracked" button.
+        self._reset_btn = FlatButton(
+            text="RESET\nCLOCK",
+            bg=PANEL,
+            fg=INK,
+            font_size=sp(20),
+            bold=True,
+            halign="center",
+        )
+        self._reset_btn.bind(on_release=lambda *_a: self._rail_reset())
+        # WEIGH on top (the everyday verb), ZERO next (occasional setup), RESET
+        # last (clears a completed batch's clock).
+        for b in (self._weigh_btn, self._zero_btn, self._reset_btn):
             rail.add_widget(b)
 
         # Screens (HomeScreen.tick() -> refresh_rail() needs the buttons above).
@@ -1331,6 +1266,9 @@ class BrewcopApp(App):
         # left-side delta readout says why.  Mock keeps it live for the demo.
         self._enable(self._weigh_btn, True)
         self._enable(self._zero_btn, self.mock or self._zero_useful())
+        # RESET is live only when a clock is running (a ready batch); otherwise
+        # there is nothing to reset, so it greys out.
+        self._enable(self._reset_btn, self.mock or self._reset_useful())
 
     def _zero_useful(self):
         # HomeScreen.__init__ ticks (-> refresh_rail) before self.home exists,
@@ -1340,6 +1278,14 @@ class BrewcopApp(App):
             return False
         delta = abs(getattr(home, "_last_grams", 0.0) - self.settings["pot_tare_g"])
         return delta <= self.ZERO_GUARD_G
+
+    def _reset_useful(self):
+        # Only a running clock (a ready batch) is resettable.  Tolerate a
+        # missing home / first reading, same as _zero_useful.
+        home = getattr(self, "home", None)
+        if home is None:
+            return False
+        return getattr(home, "_pot", None) is not None and home._pot.key == "ready"
 
     @staticmethod
     def _enable(btn, on):
@@ -1363,6 +1309,13 @@ class BrewcopApp(App):
             self.home._flash("Put the EMPTY pot on the scale to zero")
             return
         self.source.zero()
+        self.home.tick()
+
+    def _rail_reset(self):
+        # Stop the running age clock: clears the completed batch back to idle
+        # WITHOUT re-taring (unlike ZERO).  The clock vanishes on the next tick.
+        self._go("home")
+        self.source.reset()
         self.home.tick()
 
     def _go(self, name):

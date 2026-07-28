@@ -25,7 +25,6 @@ import potstate  # noqa: E402
 SETTINGS = {
     "pot_tare_g": 795,
     "pot_capacity_ml": 1250,
-    "stale_hours": 4.0,
 }
 
 BREW_A = 12.5  # boiler running
@@ -171,22 +170,18 @@ class TestScaleBrewSource(unittest.TestCase):
         clock[0] += brains.SETTLE_WINDOW_S + 1
         r3 = src.poll()  # settled -> ready
         self.assertEqual(r3.event, "ready")
-        self.assertIn(r3.pot_state.key, ("fresh", "aging"))
+        self.assertEqual(r3.pot_state.key, "ready")
 
-    def test_biohazard_clears_when_pot_emptied(self):
-        # A ready batch goes stale (biohazard up), then the coffee is poured
-        # out: the nag clears on its own -- no CLEAN button -- because the
-        # biohazard is now `stale AND coffee present`, recomputed each tick.
+    def test_reset_clears_clock(self):
+        # Drive a full brew to ready (age clock running), then RESET: the batch
+        # returns to idle and the clock is gone.  RESET does NOT re-tare, so a
+        # full pot left on the scale now reads "present", not "ready".
         import brains
 
-        cfg = dict(SETTINGS, stale_hours=4.0)
         clock = [1000.0]
         cur = ScriptedCurrentSensor(amps=BREW_A)
-        # Full pot through the brew + stale, then an empty carafe (at tare).
-        sc = ScriptedScale(
-            [(795 + 1200, True)] * 5 + [(795, True)]
-        )
-        src = brewsource.ScaleBrewSource(sc, cfg, current_sensor=cur)
+        sc = ScriptedScale([(795 + 1200, True)] * 6)
+        src = brewsource.ScaleBrewSource(sc, SETTINGS, current_sensor=cur)
         src._brains._now = lambda: clock[0]
         src.poll()  # boiler on
         clock[0] += brains.BREW_ON_DEBOUNCE_S + 1
@@ -194,14 +189,15 @@ class TestScaleBrewSource(unittest.TestCase):
         cur.amps_value = IDLE_A
         src.poll()  # boiler off, settling
         clock[0] += brains.SETTLE_WINDOW_S + 1
-        src.poll()  # ready
-        clock[0] += 4 * 3600 + 10  # age past stale
-        r = src.poll()  # still full -> stale + biohazard
-        self.assertEqual(r.pot_state.key, "stale")
-        self.assertTrue(r.pot_state.needs_clean)
-        r2 = src.poll()  # coffee poured out (carafe at tare)
-        self.assertEqual(r2.pot_state.key, "empty")
-        self.assertFalse(r2.pot_state.needs_clean)
+        r = src.poll()  # ready
+        self.assertEqual(r.pot_state.key, "ready")
+        src.reset()  # RESET pressed
+        self.assertEqual(src._brains.state, "idle")
+        r2 = src.poll()  # clock gone; full pot now just "present"
+        self.assertEqual(r2.pot_state.key, "present")
+        self.assertIsNone(r2.pot_state.age_s)
+        # tare untouched by RESET (unlike zero())
+        self.assertEqual(src._settings["pot_tare_g"], 795)
 
     def test_zero_tares_and_resets(self):
         # Zero-empty-pot: writes the current weight as the new tare and returns
@@ -224,7 +220,7 @@ class TestScaleBrewSource(unittest.TestCase):
         for _ in range(3):
             r = src.poll()
         # restored ready_time -> a real coffee state, not "present"
-        self.assertIn(r.pot_state.key, ("fresh", "aging", "stale"))
+        self.assertEqual(r.pot_state.key, "ready")
 
     def test_persists_only_on_change(self):
         # Steady readings after the first shouldn't keep rewriting the file.
@@ -278,15 +274,15 @@ class TestMockBrewSource(unittest.TestCase):
     def test_cycles_states(self):
         states = [
             potstate.PotState("no_pot", "No pot"),
-            potstate.PotState("fresh", "Fresh", fill=0.7),
-            potstate.PotState("stale", "Stale", fill=0.5, expired=True),
+            potstate.PotState("ready", "Ready", fill=0.7, age_s=3600),
+            potstate.PotState("empty", "Empty", fill=0.02),
         ]
         src = brewsource.MockBrewSource(states)
         self.assertEqual(src.poll().pot_state.key, "no_pot")
         src.advance()
-        self.assertEqual(src.poll().pot_state.key, "fresh")
+        self.assertEqual(src.poll().pot_state.key, "ready")
         src.advance()
-        self.assertEqual(src.poll().pot_state.key, "stale")
+        self.assertEqual(src.poll().pot_state.key, "empty")
         src.advance()  # wraps
         self.assertEqual(src.poll().pot_state.key, "no_pot")
 
@@ -294,7 +290,7 @@ class TestMockBrewSource(unittest.TestCase):
         # --mock shows a live-looking current: brewing ~12.5 A, else idle.
         states = [
             potstate.PotState("brewing", "Brewing", fill=0.4),
-            potstate.PotState("fresh", "Fresh", fill=0.7),
+            potstate.PotState("ready", "Ready", fill=0.7, age_s=3600),
         ]
         src = brewsource.MockBrewSource(states)
         r = src.poll()

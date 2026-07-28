@@ -12,8 +12,8 @@
 
 """
 User settings: the runtime-tweakable preferences edited on the Settings
-screen (stale timeout, pot tare/capacity, empty threshold, Slack on/off,
-backlight dimming).  Distinct from machineconfig (install-time facts on the
+screen (pot tare/capacity, Slack on/off, backlight dimming).  Distinct from
+machineconfig (install-time facts on the
 read-only root): these change at runtime and must survive reboots, so they
 live in a writable JSON, saved only on explicit Save.
 
@@ -32,12 +32,11 @@ import os
 
 DEFAULTS = {
     "slack_enabled": False,  # announce ready pots to Slack (off until retuned)
-    "stale_hours": 4.0,  # declare coffee stale after N hours
     "pot_tare_g": 795,  # empty Technivorm carafe; re-tared by Zero, persisted
     "pot_capacity_ml": 1250,  # full pot (1 g per mL water)
     "dim_timeout_s": 120,  # dim backlight after N s of no touch (0 = never)
     "dim_level": 0.15,  # dimmed brightness fraction (0..1)
-    "wake_on_event": True,  # brighten on ready/stale state change
+    "wake_on_event": True,  # brighten on a pot state change (e.g. ready)
 }
 
 

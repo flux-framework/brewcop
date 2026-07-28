@@ -217,23 +217,6 @@ class TestBrains(unittest.TestCase):
         self.assertEqual(b.ready_time, rt)
         self.assertGreaterEqual(b.elapsed(), 1800)
 
-    def test_is_stale(self):
-        b, clk = make()
-        arm_brewing(b, clk)
-        finish_brew(b, clk)
-        stale = 4 * 3600
-        self.assertFalse(b.is_stale(stale))
-        clk.advance(stale + 10)
-        self.assertTrue(b.is_stale(stale))
-
-    def test_is_stale_only_when_ready(self):
-        b, clk = make()
-        stale = 4 * 3600
-        self.assertFalse(b.is_stale(stale))  # idle
-        arm_brewing(b, clk)
-        clk.advance(stale + 10)
-        self.assertFalse(b.is_stale(stale))  # brewing, not ready
-
 
 class TestPersistence(unittest.TestCase):
     def test_snapshot_restore_preserves_ready_age(self):
