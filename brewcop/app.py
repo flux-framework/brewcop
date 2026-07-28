@@ -217,11 +217,13 @@ class PowerButton(FlatButton):
         self.bind(pos=self._draw_glyph, size=self._draw_glyph)
 
     def _draw_glyph(self, *_a):
-        # Center the glyph in the button; radius a bit under half the shorter
-        # side so the 2 dp stroke stays inside the tap target.
+        # Center the glyph in the button; radius near half the shorter side so
+        # the visible symbol fills most of the 44 dp tap target (a small glyph
+        # in a large invisible button reads as a misaligned hit box).  The 2 dp
+        # stroke still clears the edge.
         cx = self.center_x
         cy = self.center_y
-        r = min(self.width, self.height) * 0.30
+        r = min(self.width, self.height) * 0.38
         # Kivy circle angles are degrees clockwise from 12 o'clock, so an arc
         # from 30..330 leaves a 60-degree gap centered on top for the stroke.
         self._glyph_arc.circle = (cx, cy, r, 30, 330)
@@ -667,14 +669,14 @@ class HomeScreen(Screen):
         )
         title.bind(size=lambda w, s: setattr(w, "text_size", s))
         top.add_widget(title)
-        # Power button in the upper-left (where the Flux mark used to sit): a
-        # single tap opens a confirm dialog, so it can't kill the unit by
-        # accident but the kiosk can still be shut down / rebooted / the app
-        # restarted without pulling the plug.
+        # Power button in the upper-left (where the Flux mark used to sit),
+        # top-aligned with the bar: a single tap opens a confirm dialog, so it
+        # can't kill the unit by accident but the kiosk can still be shut down /
+        # rebooted / the app restarted without pulling the plug.
         power = PowerButton(
             size_hint=(None, None),
             size=(dp(44), dp(44)),
-            pos_hint={"x": 0, "center_y": 0.5},
+            pos_hint={"x": 0, "top": 1},
         )
         power.bind(on_release=lambda *_a: self._open_power_menu())
         top.add_widget(power)
