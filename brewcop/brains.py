@@ -73,6 +73,19 @@ SETTLE_WINDOW_S = 20.0
 SETTLE_EPSILON_G = 5.0
 SETTLE_FALLBACK_S = 20.0
 
+# Overflow guard: a common failure is someone leaving the Moccamaster's flow
+# selector shut (e.g. after washing the basket).  The boiler then heats and
+# brews, but nothing reaches the carafe -- the basket overfills onto the
+# counter.  We catch it as "heater running this long with no weight gain":
+# once brewing, if the contents have not climbed more than SETTLE_EPSILON_G
+# above the level at brew-arm for OVERFLOW_GRACE_S while the boiler is still
+# on, flag overflow.  The grace rides out the machine's normal pre-flow warmup
+# (the boiler heats before the first drops land); 30 s is a deliberately
+# conservative default -- long enough never to false-alarm a good brew, retune
+# from a real trace if needed.  Requires a scale (net weight); with no scale
+# there is nothing to compare, so the guard simply never fires.
+OVERFLOW_GRACE_S = 30.0
+
 
 class Brains:
     """Current-driven idle/brewing/ready state machine over contents weight."""
@@ -90,6 +103,11 @@ class Brains:
         # the pour last stopped rising (start of the settle window).
         self._brew_peak_net = 0.0
         self._settle_since = None
+        # Overflow tracking: the contents level when brewing armed (baseline to
+        # measure "has any coffee arrived") and whether we had a weight signal
+        # to seed it -- with no scale there is nothing to compare against.
+        self._brew_start_net = 0.0
+        self._brew_had_net = False
 
     # --- current-driven core -------------------------------------------
     def _update_boiler(self, amps):
@@ -135,11 +153,21 @@ class Brains:
             ):
                 self._brew_peak_net = net if net is not None else 0.0
                 self._settle_since = None
+                self._brew_start_net = net if net is not None else 0.0
+                self._brew_had_net = net is not None
                 self.ready_time = None
                 self._set_state("brewing")
             return None
 
         if self.state == "brewing":
+            # If the scale was invalid at arm-time, seed the overflow baseline
+            # from the first valid reading we get while brewing (and start the
+            # grace clock then, via the brewing-entry timestamp -- close
+            # enough, since the debounce already elapsed).
+            if net is not None and not self._brew_had_net:
+                self._brew_start_net = net
+                self._brew_peak_net = net
+                self._brew_had_net = True
             # Weight still climbing (beyond noise) -> the pour isn't done;
             # restart the settle window.
             if net is not None and net > self._brew_peak_net + SETTLE_EPSILON_G:
@@ -175,6 +203,8 @@ class Brains:
         self._boiler_on_since = None
         self._brew_peak_net = 0.0
         self._settle_since = None
+        self._brew_start_net = 0.0
+        self._brew_had_net = False
         self._net = 0.0
         self._set_state("idle")
 
@@ -191,6 +221,26 @@ class Brains:
         rather than waiting out BREW_ON_DEBOUNCE_S for the state to reach
         'brewing'."""
         return self._boiler_on
+
+    @property
+    def overflow(self):
+        """True when a brew appears to be running with nothing reaching the
+        carafe -- the boiler is on, we are brewing, and the contents have not
+        climbed past SETTLE_EPSILON_G above the brew-start level for at least
+        OVERFLOW_GRACE_S.  The classic cause is the flow selector left shut, so
+        the basket overfills.  Requires a weight signal (self._brew_had_net);
+        with no scale we can't tell, so it stays False.  Self-clearing: the
+        instant coffee starts flowing the gain exceeds epsilon and this drops
+        back to False.  A live derived condition, deliberately NOT a state, so
+        it can't corrupt the idle/brewing/ready lifecycle."""
+        if self.state != "brewing" or not self._boiler_on:
+            return False
+        if not self._brew_had_net:
+            return False
+        gained = self._brew_peak_net - self._brew_start_net
+        if gained > SETTLE_EPSILON_G:
+            return False
+        return (self._now() - self.timestamp) >= OVERFLOW_GRACE_S
 
     def elapsed(self, now=None):
         """

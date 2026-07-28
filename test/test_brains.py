@@ -247,6 +247,67 @@ class TestPersistence(unittest.TestCase):
         b.restore(None)
         self.assertEqual(b.state, "idle")
 
+    # --- overflow (stuck brew) -----------------------------------------
+    def test_overflow_when_brewing_with_no_weight_gain(self):
+        # Boiler running, brewing armed, but the contents never climb: after
+        # the grace window this reads as an overflow (flow selector shut).
+        b, clk = make()
+        arm_brewing(b, clk, net=0)
+        self.assertFalse(b.overflow)  # grace hasn't elapsed yet
+        clk.advance(brains.OVERFLOW_GRACE_S + 1)
+        b.store(0, amps=BREW_A)  # still hot, still no coffee
+        self.assertTrue(b.overflow)
+
+    def test_no_overflow_before_grace(self):
+        # A normal brew's pre-flow warmup must not trip the guard early.
+        b, clk = make()
+        arm_brewing(b, clk, net=0)
+        clk.advance(brains.OVERFLOW_GRACE_S - 1)
+        b.store(0, amps=BREW_A)
+        self.assertFalse(b.overflow)
+
+    def test_overflow_clears_when_coffee_flows(self):
+        # Once weight climbs past the epsilon, the condition self-clears.
+        b, clk = make()
+        arm_brewing(b, clk, net=0)
+        clk.advance(brains.OVERFLOW_GRACE_S + 1)
+        b.store(0, amps=BREW_A)
+        self.assertTrue(b.overflow)
+        b.store(brains.SETTLE_EPSILON_G + 50, amps=BREW_A)  # coffee arrives
+        self.assertFalse(b.overflow)
+
+    def test_no_overflow_during_normal_brew(self):
+        # A healthy brew with the pour climbing never flags overflow.
+        b, clk = make()
+        arm_brewing(b, clk, net=100)
+        clk.advance(brains.OVERFLOW_GRACE_S + 1)
+        b.store(400, amps=BREW_A)  # well past epsilon
+        self.assertFalse(b.overflow)
+
+    def test_no_overflow_without_scale(self):
+        # With no weight signal (net always None) the guard can't judge and
+        # must stay quiet rather than false-alarm.
+        b, clk = make()
+        b.store(None, amps=BREW_A)
+        clk.advance(brains.BREW_ON_DEBOUNCE_S + 1)
+        b.store(None, amps=BREW_A)
+        self.assertEqual(b.state, "brewing")
+        clk.advance(brains.OVERFLOW_GRACE_S + 1)
+        b.store(None, amps=BREW_A)
+        self.assertFalse(b.overflow)
+
+    def test_no_overflow_when_boiler_off(self):
+        # Boiler off (e.g. settling) is not an overflow even with no gain.
+        b, clk = make()
+        arm_brewing(b, clk, net=0)
+        clk.advance(brains.OVERFLOW_GRACE_S + 1)
+        b.store(0, amps=IDLE_A)  # heater off
+        self.assertFalse(b.overflow)
+
+    def test_no_overflow_when_idle(self):
+        b, _ = make()
+        self.assertFalse(b.overflow)
+
 
 if __name__ == "__main__":
     unittest.main()
