@@ -648,6 +648,7 @@ class HomeScreen(Screen):
         self._last_key = None  # for wake-on-event edge detection
         self._flashing = False  # suppress status updates while flashing a msg
         self._last_grams = 0.0  # last valid raw reading, held while moving
+        self._overflow_active = False  # for wake+publish on the overflow edge
         root = BoxLayout(orientation="vertical", padding=dp(24), spacing=dp(16))
 
         # top bar: title centered across the FULL width (badge + settings
@@ -688,6 +689,31 @@ class HomeScreen(Screen):
         gear.bind(on_release=lambda *_a: go("settings"))
         top.add_widget(gear)
         root.add_widget(top)
+
+        # Sticky overflow warning: a common failure is the Moccamaster flow
+        # selector being left shut (e.g. after washing the basket), so the
+        # boiler brews but nothing reaches the carafe and the basket overfills.
+        # Brains flags this ("heater on, no weight gain past a grace window")
+        # and it rides out to here on PollResult.overflow.  The banner is a
+        # full-width red bar that stays up as long as the condition holds and
+        # self-clears the instant coffee flows -- it collapses to zero height
+        # when idle so it takes no space in the normal layout.
+        self.overflow_banner = Label(
+            text="",
+            color=INK,
+            font_size=sp(20),
+            bold=True,
+            halign="center",
+            valign="middle",
+            size_hint_y=None,
+            height=0,
+            opacity=0,
+        )
+        self.overflow_banner.bind(
+            size=lambda w, s: setattr(w, "text_size", s)
+        )
+        _fill(self.overflow_banner, RED, radius=dp(10))
+        root.add_widget(self.overflow_banner)
 
         # Carafe centerpiece.  Brewing is auto-detected from boiler current, so
         # there is nothing to dial here; the ZERO/WEIGH actions live in the
@@ -848,10 +874,31 @@ class HomeScreen(Screen):
         # Publish + wake on the brewing->ready transition (app -> MQTT).
         if result.event == "ready":
             self.app.on_ready_event(result)
+        # Overflow warning: show/hide the sticky banner to match the live
+        # condition, and on its rising edge wake the screen and alert MQTT.
+        self._set_overflow(result)
         # Wake the screen on any state change worth noticing.
         if pot.key != self._last_key:
             self.app.wake(pot)
         self._last_key = pot.key
+
+    def _set_overflow(self, result):
+        """Drive the sticky overflow banner from PollResult.overflow.  Edge-
+        triggered side effects (wake + MQTT alert) fire only as it turns on, so
+        a held overflow doesn't re-alert every tick; the banner itself tracks
+        the live condition and self-clears when coffee flows."""
+        active = bool(result.overflow)
+        if active and not self._overflow_active:
+            self.app.on_overflow_event(result)  # rising edge: wake + publish
+        if active:
+            self.overflow_banner.text = "OVERFLOW -- check the flow selector"
+            self.overflow_banner.height = dp(48)
+            self.overflow_banner.opacity = 1
+        else:
+            self.overflow_banner.text = ""
+            self.overflow_banner.height = 0
+            self.overflow_banner.opacity = 0
+        self._overflow_active = active
 
     def _cycle(self):
         # --mock only: advance canned states.
@@ -1304,6 +1351,14 @@ class BrewcopApp(App):
         Fire-and-forget -- publish never raises into the tick."""
         self.wake(result.pot_state)
         brewnotify.publish_ready(self.machine, result)
+
+    def on_overflow_event(self, result):
+        """Overflow just started (rising edge): a brew is running with nothing
+        reaching the carafe.  Wake the screen so the banner is seen and alert
+        MQTT once for the edge; a downstream consumer decides policy.  Fire-
+        and-forget -- publish never raises into the tick."""
+        self.wake(result.pot_state)
+        brewnotify.publish_overflow(self.machine, result)
 
     # --- backlight inactivity dimming ---------------------------------
     def wake(self, pot=None):
