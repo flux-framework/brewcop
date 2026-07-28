@@ -97,6 +97,7 @@ MUTED = (0.55, 0.60, 0.66, 1)  # secondary text
 ACCENT = (0.29, 0.62, 1.00, 1)  # flux-ish blue
 GREEN = (0.36, 0.78, 0.45, 1)  # coffee ready
 RED = (0.92, 0.35, 0.35, 1)  # empty / kaput
+RED_ALERT = (0.98, 0.18, 0.18, 1)  # saturated red for the flashing overflow bar
 HAZARD = (0.95, 0.85, 0.10, 1)  # warning yellow (transient flash messages)
 GRAPHITE = (0.16, 0.17, 0.20, 1)  # carafe lid/handle/base (dark plastic;
 # dark, but not pure black so it still
@@ -697,7 +698,9 @@ class HomeScreen(Screen):
         # and it rides out to here on PollResult.overflow.  The banner is a
         # full-width red bar that stays up as long as the condition holds and
         # self-clears the instant coffee flows -- it collapses to zero height
-        # when idle so it takes no space in the normal layout.
+        # when idle so it takes no space in the normal layout.  It FLASHES (fill
+        # + a bright border pulse on a blink clock) so it catches the eye even
+        # when nobody is looking straight at the screen.
         self.overflow_banner = Label(
             text="",
             color=INK,
@@ -712,7 +715,25 @@ class HomeScreen(Screen):
         self.overflow_banner.bind(
             size=lambda w, s: setattr(w, "text_size", s)
         )
-        _fill(self.overflow_banner, RED, radius=dp(10))
+        _fill(self.overflow_banner, RED_ALERT, radius=dp(10))
+        # Bright border drawn over the fill; its Color and shape are stashed so
+        # the blink can pulse both the fill and the border for a strong flash.
+        bn = self.overflow_banner
+        with bn.canvas.after:
+            bn._border_color = Color(*HAZARD)
+            bn._border = Line(
+                rounded_rectangle=(bn.x, bn.y, bn.width, bn.height, dp(10)),
+                width=dp(3),
+            )
+
+        def _sync_border(*_a):
+            bn._border.rounded_rectangle = (
+                bn.x, bn.y, bn.width, bn.height, dp(10),
+            )
+
+        bn.bind(pos=_sync_border, size=_sync_border)
+        self._overflow_blink_ev = None  # blink clock, live only while flashing
+        self._overflow_blink_on = True
         root.add_widget(self.overflow_banner)
 
         # Carafe centerpiece.  Brewing is auto-detected from boiler current, so
@@ -898,7 +919,38 @@ class HomeScreen(Screen):
             self.overflow_banner.text = ""
             self.overflow_banner.height = 0
             self.overflow_banner.opacity = 0
+        self._set_overflow_blink(active)
         self._overflow_active = active
+
+    def _set_overflow_blink(self, on):
+        """Run the flash clock only while the overflow banner is up.  Idempotent
+        -- safe to call every tick; it starts/stops the interval on the edge and
+        restores the banner to its bright resting look when it stops."""
+        if on and self._overflow_blink_ev is None:
+            # Start on the bright phase so the bar is fully lit the instant it
+            # appears, before the first blink tick lands.
+            self._overflow_blink_on = True
+            self.overflow_banner._bg_color.rgba = RED_ALERT
+            self.overflow_banner._border_color.rgba = HAZARD
+            self._overflow_blink_ev = Clock.schedule_interval(
+                self._overflow_blink, 0.5
+            )
+        elif not on and self._overflow_blink_ev is not None:
+            self._overflow_blink_ev.cancel()
+            self._overflow_blink_ev = None
+
+    def _overflow_blink(self, _dt):
+        # Alternate between a hot red bar with a yellow border and a dimmed,
+        # borderless phase, so the whole bar pulses rather than just blinking a
+        # word.  Toggling alpha (not visibility) keeps the layout height steady.
+        self._overflow_blink_on = not self._overflow_blink_on
+        bn = self.overflow_banner
+        if self._overflow_blink_on:
+            bn._bg_color.rgba = RED_ALERT
+            bn._border_color.rgba = HAZARD
+        else:
+            bn._bg_color.rgba = (RED_ALERT[0], RED_ALERT[1], RED_ALERT[2], 0.35)
+            bn._border_color.rgba = (HAZARD[0], HAZARD[1], HAZARD[2], 0.0)
 
     def _cycle(self):
         # --mock only: advance canned states.
