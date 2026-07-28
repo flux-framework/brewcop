@@ -42,7 +42,7 @@ across reboots), press **BREW** on the rail.
 While brewing, contents reach the target-line level (which IS the
 finished-pot level, so it's an exact match within scale noise
 ±POT_TOLERANCE_G — no absorption margin, no fudge constant).
-→ `ready`; `ready_time` set; Slack "ready" fires (if enabled).
+→ `ready`; `ready_time` set; a `ready` event is published to MQTT.
 
 **A3. Brew stalls short → drag the line down to complete.** ✅🟡
 Grounds absorbed more than expected; the level plateaus below the target line.
@@ -137,10 +137,13 @@ after dim only wakes). A ready/stale change also wakes.
 
 ## G. Notifications
 
-**G1. Slack "coffee ready".** 🟡 (OFF by default)
-On a brew reaching `ready`, notify Slack IF `slack_enabled`. Because ready
-only follows an explicit BREW, pours/placements/returns never notify — the
-storm is structurally impossible now, not just tuned away.
+**G1. Publish "coffee ready" to MQTT.** 🟡
+On a brew reaching `ready`, publish to `<mqtt_topic_prefix>/<location>/ready`.
+brewcop is notification-agnostic: a downstream MQTT consumer decides whether
+to post to Slack, drive signage, etc. With `mqtt_host` empty the app runs
+normally and publishes nothing. Because ready only follows an explicit BREW,
+pours/placements/returns never publish — the storm is structurally impossible
+now, not just tuned away.
 
 ---
 
@@ -150,5 +153,7 @@ storm is structurally impossible now, not just tuned away.
   `pot_capacity_ml` (1250). The true finished level of a "full" brew is a bit
   less (grounds retain water); the target line self-calibrates in use (A3),
   but a better default could be set from a real brew.
-- **❓ Enable Slack.** Now that ready is gated by explicit BREW, it may be
-  safe to default `slack_enabled` on — decide after on-machine confirmation.
+- **❓ Downstream notification policy.** Now that ready is gated by explicit
+  BREW, the MQTT consumer can safely notify on every `ready` — decide the
+  policy (which channel, quiet hours) in the consumer after on-machine
+  confirmation.
