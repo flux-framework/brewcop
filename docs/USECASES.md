@@ -149,14 +149,16 @@ now, not just tuned away.
 
 ## H. Power / controls
 
-**H1. Shut down, reboot, or restart the app from the screen.** 🟡
+**H1. Shut down, reboot, or stop/restart the app from the screen.** 🟡
 Tap the power button (upper-left of Home, standard power glyph).
-→ a confirm dialog offers **Power off**, **Reboot**, **Restart app**, and
-Cancel. A single stray touch only opens the dialog; the destructive action
-needs a second deliberate tap. Power off / reboot bring the OS down cleanly
-(no plug-pull, the SD-corruption risk read-only-root guards against);
-restart app bounces just `brewcop.service` to recover a wedged UI without a
-power-cycle. The actions run `systemctl` as the unprivileged brewcop user,
+→ a confirm dialog offers **Power off**, **Reboot**, **Stop app**,
+**Restart app**, and Cancel. A single stray touch only opens the dialog; the
+destructive action needs a second deliberate tap. Power off / reboot bring the
+OS down cleanly (no plug-pull, the SD-corruption risk read-only-root guards
+against); stop app leaves `brewcop.service` down (a clean stop is not a
+failure, so `Restart=on-failure` does not bounce it), and restart app bounces
+it to recover a wedged UI without a power-cycle. The actions run `systemctl`
+as the unprivileged brewcop user,
 authorized by the polkit rule the deb ships
 (`/usr/share/polkit-1/rules.d/70-brewcop.rules`); a denial is flashed on the
 status line rather than crashing. In `--windowed`/`--mock` dev runs the
