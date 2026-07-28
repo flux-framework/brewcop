@@ -630,6 +630,10 @@ def mock_states():
         potstate.PotState("empty", "Empty pot", 0.02),
         potstate.PotState("present", "Coffee: ~0.94 L", 0.75),
         potstate.PotState("brewing", "Brewing - 3 min", 0.40),
+        # Stuck brew: boiler running but the carafe fill isn't climbing (flow
+        # selector shut).  MockBrewSource flags overflow on this key so the
+        # warning banner can be exercised in --mock.
+        potstate.PotState("overflow", "Brewing - 1 min", 0.02),
         potstate.PotState(
             "ready", "Coffee: ~0.94 L - 2h 10m", 0.75, age_s=2 * 3600 + 10 * 60 + 42
         ),

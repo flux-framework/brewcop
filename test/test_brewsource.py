@@ -269,6 +269,47 @@ class TestScaleBrewSource(unittest.TestCase):
         self.assertTrue(r.valid)
         self.assertIsNone(r.amps)
 
+    def test_overflow_surfaced_on_stuck_brew(self):
+        # Flow selector left shut: the boiler heats and stays on, but the
+        # carafe weight never climbs.  Past the grace window, poll() must
+        # surface overflow=True so the UI can warn.
+        from brewcop import brains
+
+        clock = [1000.0]
+        cur = ScriptedCurrentSensor(amps=BREW_A)  # boiler stays on throughout
+        sc = ScriptedScale([(795 + 40, True)] * 10)  # empty carafe, never climbs
+        src = brewsource.ScaleBrewSource(sc, SETTINGS, current_sensor=cur)
+        src._brains._now = lambda: clock[0]
+        src.poll()  # boiler on; debounce not yet met
+        clock[0] += brains.BREW_ON_DEBOUNCE_S + 1
+        r = src.poll()  # brewing armed
+        self.assertEqual(r.pot_state.key, "brewing")
+        self.assertFalse(r.overflow)  # still inside the grace window
+        clock[0] += brains.OVERFLOW_GRACE_S + 1
+        r = src.poll()  # heater on this long with no gain -> overflow
+        self.assertTrue(r.overflow)
+
+    def test_no_overflow_on_healthy_brew(self):
+        # A good brew climbing past the epsilon must never flag overflow, even
+        # after the grace window has elapsed.
+        from brewcop import brains
+
+        clock = [1000.0]
+        cur = ScriptedCurrentSensor(amps=BREW_A)
+        sc = ScriptedScale(
+            [(795 + 100, True), (795 + 100, True)]  # arm brewing at 100 g net
+            + [(795 + 1200, True)] * 8  # then the carafe fills
+        )
+        src = brewsource.ScaleBrewSource(sc, SETTINGS, current_sensor=cur)
+        src._brains._now = lambda: clock[0]
+        src.poll()  # boiler on
+        clock[0] += brains.BREW_ON_DEBOUNCE_S + 1
+        src.poll()  # brewing armed
+        clock[0] += brains.OVERFLOW_GRACE_S + 1
+        r = src.poll()  # weight has climbed well past epsilon
+        self.assertEqual(r.pot_state.key, "brewing")
+        self.assertFalse(r.overflow)
+
 
 class TestMockBrewSource(unittest.TestCase):
     def test_cycles_states(self):
@@ -300,6 +341,22 @@ class TestMockBrewSource(unittest.TestCase):
         r = src.poll()
         self.assertAlmostEqual(r.amps, 0.5)  # idle
         self.assertFalse(r.boiler_on)
+
+    def test_overflow_flagged_on_overflow_state(self):
+        # The "overflow" mock key drives a live-looking stuck brew: heater on
+        # (rain cloud) with overflow=True, so --mock can exercise the banner.
+        states = [
+            potstate.PotState("overflow", "Brewing - 1 min", fill=0.02),
+            potstate.PotState("ready", "Ready", fill=0.7, age_s=3600),
+        ]
+        src = brewsource.MockBrewSource(states)
+        r = src.poll()
+        self.assertTrue(r.overflow)
+        self.assertTrue(r.boiler_on)  # heater on during an overflow
+        self.assertAlmostEqual(r.amps, 12.5)
+        src.advance()
+        r = src.poll()
+        self.assertFalse(r.overflow)  # a healthy ready state
 
 
 if __name__ == "__main__":

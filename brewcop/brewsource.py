@@ -40,6 +40,7 @@ class PollResult:
         moving=False,
         amps=None,
         boiler_on=False,
+        overflow=False,
     ):
         self.pot_state = pot_state  # potstate.PotState
         self.event = event  # "ready" or None
@@ -48,6 +49,7 @@ class PollResult:
         self.moving = moving  # scale in motion / reading not yet stable
         self.amps = amps  # last boiler current reading (A) or None
         self.boiler_on = boiler_on  # heater drawing current now (pre-debounce)
+        self.overflow = overflow  # brewing but nothing reaching the carafe
 
 
 class ScaleBrewSource:
@@ -121,6 +123,7 @@ class ScaleBrewSource:
                 moving=True,
                 amps=amps,
                 boiler_on=self._brains.boiler_on,
+                overflow=self._brains.overflow,
             )
 
         raw = self._scale.weight
@@ -148,6 +151,7 @@ class ScaleBrewSource:
             moving=False,
             amps=amps,
             boiler_on=self._brains.boiler_on,
+            overflow=self._brains.overflow,
         )
 
     def zero(self):
@@ -202,14 +206,16 @@ class MockBrewSource:
         # Synthesize a plausible boiler current so --mock shows a live-looking
         # readout: a brewing state draws ~12.5 A, everything else sits at the
         # ~0.5 A idle standing current.
-        amps = 12.5 if st.key == "brewing" else 0.5
+        brewing = st.key in ("brewing", "overflow")
+        amps = 12.5 if brewing else 0.5
         return PollResult(
             st,
             event=None,
             raw_grams=None,
             valid=True,
             amps=amps,
-            boiler_on=(st.key == "brewing"),
+            boiler_on=brewing,
+            overflow=(st.key == "overflow"),
         )
 
     def advance(self):
