@@ -210,18 +210,20 @@ class PowerButton(FlatButton):
 
     def __init__(self, **kwargs):
         super().__init__(bg=BG, **kwargs)
-        # Draw the glyph in canvas.before (like _fill and the carafe), NOT
-        # canvas.after.  A canvas.after drawing here stayed pinned at the
-        # pre-layout window origin -- its pos-bind redraw did not track the
-        # button once pos_hint moved it, even though the canvas.before
-        # background did.  canvas.before is the pattern that works everywhere
-        # else in this app, so use it.  The fill is added first (in super), so
-        # the glyph, added here, paints on top of it.
+        # The fill is added first (in super's canvas.before), so the glyph,
+        # added here, paints on top of it.
         with self.canvas.before:
             self._glyph_color = Color(*ACCENT)
             self._glyph_arc = Line(width=dp(2))
             self._glyph_bar = Line(width=dp(2))
-        self.bind(pos=self._draw_glyph, size=self._draw_glyph)
+        # Bind to `center`, NOT `pos`.  When a parent layout moves us, `pos`
+        # dispatches before `center`'s cached value is recomputed, so a
+        # pos-bound redraw reads a stale center and draws the glyph at the old
+        # y -- which is why it stuck near the window origin below the button.
+        # `center` dispatches after x/y settle, so it always has the final
+        # position.  (This was the actual bug behind the "glyph in the wrong
+        # spot" symptom -- not the canvas layer.)
+        self.bind(center=self._draw_glyph, size=self._draw_glyph)
 
     def _draw_glyph(self, *_a):
         # Center the glyph in the button; radius near half the shorter side so
