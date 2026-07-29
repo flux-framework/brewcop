@@ -170,9 +170,15 @@ class FlatButton(Button):
 # UI surfaces rather than crashing on.  stop/restart both fall under the rule's
 # manage-units grant (scoped to brewcop.service); a clean stop is not a failure,
 # so Restart=on-failure leaves the app down until it is started again.
+# -i / --ignore-inhibitors on poweroff/reboot: without it, systemctl refuses
+# (returning nonzero, so the box stays up) whenever an inhibitor lock is held
+# or another session is logged in -- e.g. an admin SSH'd in, or a lingering
+# seat.  A deliberate button press is meant to win over those, matching the
+# polkit rule that already authorizes the -ignore-inhibit action variant.  The
+# app-restart verbs act on our own unit, so they never hit the inhibitor path.
 _SYSTEM_ACTIONS = {
-    "poweroff": ["systemctl", "poweroff"],
-    "reboot": ["systemctl", "reboot"],
+    "poweroff": ["systemctl", "poweroff", "-i"],
+    "reboot": ["systemctl", "reboot", "-i"],
     "stop-app": ["systemctl", "stop", "brewcop.service"],
     "restart-app": ["systemctl", "restart", "brewcop.service"],
 }
