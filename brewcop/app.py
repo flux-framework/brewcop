@@ -209,21 +209,19 @@ class PowerButton(FlatButton):
     """
 
     def __init__(self, **kwargs):
-        # DIAGNOSTIC: visible panel background so the actual tap target is
-        # visible on screen (normally bg=BG, invisible against the screen).
-        super().__init__(bg=PANEL, **kwargs)
-        with self.canvas.after:
+        super().__init__(bg=BG, **kwargs)
+        # Draw the glyph in canvas.before (like _fill and the carafe), NOT
+        # canvas.after.  A canvas.after drawing here stayed pinned at the
+        # pre-layout window origin -- its pos-bind redraw did not track the
+        # button once pos_hint moved it, even though the canvas.before
+        # background did.  canvas.before is the pattern that works everywhere
+        # else in this app, so use it.  The fill is added first (in super), so
+        # the glyph, added here, paints on top of it.
+        with self.canvas.before:
             self._glyph_color = Color(*ACCENT)
             self._glyph_arc = Line(width=dp(2))
             self._glyph_bar = Line(width=dp(2))
         self.bind(pos=self._draw_glyph, size=self._draw_glyph)
-        # The pos/size binds fire during __init__ (at the window origin) and on
-        # resize, but a pos_hint-positioned widget is moved by the parent's
-        # first layout pass without reliably re-firing pos here -- leaving the
-        # glyph drawn at the pre-layout origin while touches land at the real
-        # (moved) position.  Redraw once after that first layout frame so the
-        # glyph and the hit box agree.
-        Clock.schedule_once(self._draw_glyph, 0)
 
     def _draw_glyph(self, *_a):
         # Center the glyph in the button; radius near half the shorter side so
