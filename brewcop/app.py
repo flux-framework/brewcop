@@ -981,9 +981,16 @@ class HomeScreen(Screen):
         # Dev-safety: in windowed/mock runs (a workstation, not the kiosk) log
         # the intended command instead of actually powering the box off.
         dev_safe = self.app.windowed or self.app.mock
+        # Record every power action on the journal: on the kiosk this is the
+        # only trace that a button press happened, and its absence vs presence
+        # tells a diagnostician whether the press even reached this handler.
+        print("power: action requested: {}".format(verb), file=sys.stderr)
         err = _system_action(verb, dev_safe=dev_safe)
         if err:
+            print("power: {} failed: {}".format(verb, err), file=sys.stderr)
             self._flash("power: {}".format(err), seconds=4.0)
+        else:
+            print("power: {} dispatched ok".format(verb), file=sys.stderr)
 
     def _flash(self, msg, seconds=2.0):
         # Briefly show a message on the status line, holding it against the
