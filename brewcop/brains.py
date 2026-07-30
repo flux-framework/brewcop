@@ -80,11 +80,11 @@ SETTLE_FALLBACK_S = 20.0
 # once brewing, if the contents have not climbed more than SETTLE_EPSILON_G
 # above the level at brew-arm for OVERFLOW_GRACE_S while the boiler is still
 # on, flag overflow.  The grace rides out the machine's normal pre-flow warmup
-# (the boiler heats before the first drops land); 30 s is a deliberately
+# (the boiler heats before the first drops land); 60 s is a deliberately
 # conservative default -- long enough never to false-alarm a good brew, retune
 # from a real trace if needed.  Requires a scale (net weight); with no scale
 # there is nothing to compare, so the guard simply never fires.
-OVERFLOW_GRACE_S = 30.0
+OVERFLOW_GRACE_S = 60.0
 
 
 class Brains:
