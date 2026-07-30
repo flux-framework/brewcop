@@ -323,8 +323,9 @@ class CarafeWidget(Widget):
         self._blink_on = True
         self._blink_ev = None
         self._body = None  # geometry cached by _redraw
-        # Running age clock (HH:MM:SS) shown centered in the body once a batch
-        # is ready; suppressed while brewing (the rain cloud takes over).
+        # Running age clock (HH:MM:SS) shown in the headroom above the lid once
+        # a batch is ready; suppressed while brewing (the rain cloud takes over
+        # the same slot).
         self._age_s = None  # raw age seconds (None -> no clock)
         self._brewing = False  # in-progress brew -> rain-cloud icon
         self._age_label = Label(
@@ -515,16 +516,19 @@ class CarafeWidget(Widget):
             cloud_cy = lid_top + head * 0.62  # cloud sits high in the headroom
             self._draw_brewing(cx, cloud_cy, top_w * 1.25, lid_top)
 
-        # Ready coffee: a running HH:MM:SS age clock centered in the body.  It
-        # yields to the rain cloud -- when a new brew's heater fires (brewing),
-        # the clock disappears in lockstep with the rain starting, so the two
-        # never show together.
+        # Ready coffee: a running HH:MM:SS age clock in the headroom ABOVE the
+        # lid -- the same slot the brewing rain-cloud uses.  The two never show
+        # together (the clock yields to the cloud the instant a new brew's
+        # heater fires), so they share the space: the age reads as sitting over
+        # the pot, not painted across the steel body.
         if self._age_s is not None and not self._brewing:
-            body_cy = by + body_h * 0.46
+            lid_top = ly + lid_h
+            head = (y + h) - lid_top  # free space above the lid
+            clock_cy = lid_top + head * 0.55  # sit high in the headroom
             side = min(top_w, base_w)
             self._age_label.text = self._fmt_clock(self._age_s)
             self._age_label.size = (side * 1.4, dp(44))
-            self._age_label.pos = (cx - side * 0.7, body_cy - dp(22))
+            self._age_label.pos = (cx - side * 0.7, clock_cy - dp(22))
             self._age_label.opacity = 1
         else:
             self._age_label.opacity = 0
